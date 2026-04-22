@@ -62,6 +62,60 @@ pub struct ExportedNode<Config> {
     pub config: Config,
 }
 
+pub trait GraphBuilderGraphSpecExt {
+    fn graph_spec(&self) -> Result<GraphSpec, GraphError>;
+}
+
+impl GraphBuilderGraphSpecExt for GraphBuilder {
+    fn graph_spec(&self) -> Result<GraphSpec, GraphError> {
+        let snapshot = self.spec_snapshot();
+        let mut nodes = Vec::with_capacity(snapshot.nodes.len());
+
+        for node in snapshot.nodes {
+            match node.kind {
+                "producer" => nodes.push(NodeSpec::Producer(ExportedNode {
+                    id: node.id,
+                    config: from_str(&node.config_json).map_err(|error| {
+                        GraphError::Validation(format!(
+                            "invalid stored producer config json: {error}"
+                        ))
+                    })?,
+                })),
+                "scale" => nodes.push(NodeSpec::Scale(ExportedNode {
+                    id: node.id,
+                    config: from_str(&node.config_json).map_err(|error| {
+                        GraphError::Validation(format!(
+                            "invalid stored scale config json: {error}"
+                        ))
+                    })?,
+                })),
+                other => {
+                    return Err(GraphError::Validation(format!(
+                        "unsupported node kind `{other}` in builder snapshot"
+                    )));
+                }
+            }
+        }
+
+        let edges = snapshot
+            .edges
+            .into_iter()
+            .map(|edge| EdgeSpec {
+                from: PortRef {
+                    node: edge.from_node,
+                    port: edge.from_port.into(),
+                },
+                to: PortRef {
+                    node: edge.to_node,
+                    port: edge.to_port.into(),
+                },
+            })
+            .collect();
+
+        Ok(GraphSpec { nodes, edges })
+    }
+}
+
 enum BuiltNode {
     Producer(crate::framework::NodeHandle<crate::nodes::producer::ProducerNode>),
     Scale(crate::framework::NodeHandle<crate::nodes::scale::ScaleNode>),
@@ -257,13 +311,15 @@ mod tests {
 
     #[tokio::test]
     async fn programmatic_graph_runs() {
-        let (graph, mut result) =
+        let (graph, mut result, mut result2) =
             build_programmatic_graph(ProducerConfig { value: 3.5 }, ScaleConfig { factor: 2.0 })
                 .expect("graph builds");
 
         let run = tokio::spawn(graph.run());
         let value = result.recv().await.expect("result value");
+        let value2 = result2.recv().await.expect("result value");
         assert_eq!(value, 7.0);
+        assert_eq!(value2, 14.0);
         run.await.expect("task join").expect("graph run");
     }
 
@@ -324,5 +380,43 @@ mod tests {
 
         assert_eq!(producer.id, "producer_1");
         assert_eq!(scale.id, "scale_1");
+    }
+
+    #[test]
+    fn builder_can_export_graph_spec() {
+        let mut builder = GraphBuilder::new();
+        let producer = builder.add(ProducerNodeSpec::new(ProducerConfig { value: 6.0 }));
+        let scale = builder.add(ScaleNodeSpec::new(ScaleConfig { factor: 1.5 }));
+
+        builder
+            .connect(producer.output.value, scale.input.value)
+            .expect("connect");
+
+        let spec = builder.graph_spec().expect("graph spec");
+        assert_eq!(spec.nodes.len(), 2);
+        assert_eq!(spec.edges.len(), 1);
+        assert!(matches!(&spec.nodes[0], NodeSpec::Producer(_)));
+        assert_eq!(spec.edges[0].from.node, "producer_1");
+        assert_eq!(spec.edges[0].to.node, "scale_1");
+    }
+
+    #[tokio::test]
+    async fn one_output_can_feed_multiple_inputs() {
+        let mut builder = GraphBuilder::new();
+        let producer = builder.add(ProducerNodeSpec::new(ProducerConfig { value: 5.0 }));
+        let scale_1 = builder.add(ScaleNodeSpec::new(ScaleConfig { factor: 2.0 }));
+        let scale_2 = builder.add(ScaleNodeSpec::new(ScaleConfig { factor: 3.0 }));
+
+        builder.connect(producer.output.value, scale_1.input.value).expect("connect scale_1");
+        builder.connect(producer.output.value, scale_2.input.value).expect("connect scale_2");
+        let mut result_1 = builder.capture_output(scale_1.output.result).expect("capture scale_1");
+        let mut result_2 = builder.capture_output(scale_2.output.result).expect("capture scale_2");
+
+        let graph = builder.build();
+        let run = tokio::spawn(graph.run());
+
+        assert_eq!(result_1.recv().await.expect("scale_1 value"), 10.0);
+        assert_eq!(result_2.recv().await.expect("scale_2 value"), 15.0);
+        run.await.expect("task join").expect("graph run");
     }
 }

@@ -103,6 +103,27 @@ pub struct PortSchema {
     pub schema: JsonSchema,
 }
 
+#[derive(Clone, Debug)]
+pub struct GraphNodeSnapshot {
+    pub id: String,
+    pub kind: &'static str,
+    pub config_json: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct GraphEdgeSnapshot {
+    pub from_node: String,
+    pub from_port: &'static str,
+    pub to_node: String,
+    pub to_port: &'static str,
+}
+
+#[derive(Clone, Debug)]
+pub struct GraphSpecSnapshot {
+    pub nodes: Vec<GraphNodeSnapshot>,
+    pub edges: Vec<GraphEdgeSnapshot>,
+}
+
 pub trait NodeInputs: Send + Sized + 'static {
     type Ports;
 
@@ -195,12 +216,12 @@ pub struct OutputRuntime {
 }
 
 impl OutputRuntime {
-    pub async fn send<T: Send + 'static>(
+    pub async fn send<T: Clone + Send + 'static>(
         &mut self,
         port: &'static str,
         value: T,
     ) -> Result<(), GraphError> {
-        let sender = self
+        let senders = self
             .ports
             .remove(port)
             .ok_or(GraphError::MissingOutputPort {
@@ -208,21 +229,32 @@ impl OutputRuntime {
                 port,
             })?;
 
-        let sender = sender
-            .downcast::<mpsc::Sender<T>>()
+        let mut senders = senders
+            .downcast::<Vec<mpsc::Sender<T>>>()
             .map(|boxed| *boxed)
             .map_err(|_| GraphError::NodeExecution {
                 node: self.node_name,
                 message: format!("output port `{port}` had an unexpected runtime type"),
             })?;
 
-        sender
-            .send(value)
-            .await
-            .map_err(|_| GraphError::NodeExecution {
-                node: self.node_name,
-                message: format!("output port `{port}` receiver was closed"),
-            })
+        let sender_count = senders.len();
+        for (index, sender) in senders.iter_mut().enumerate() {
+            let payload = if index + 1 == sender_count {
+                value.clone()
+            } else {
+                value.clone()
+            };
+
+            sender
+                .send(payload)
+                .await
+                .map_err(|_| GraphError::NodeExecution {
+                    node: self.node_name,
+                    message: format!("output port `{port}` receiver was closed"),
+                })?;
+        }
+
+        Ok(())
     }
 }
 
@@ -269,6 +301,8 @@ pub struct GraphBuilder {
     nodes: Vec<NodeRegistration>,
     channel_capacity: usize,
     next_id_by_kind: BTreeMap<&'static str, usize>,
+    node_specs: Vec<GraphNodeSnapshot>,
+    edges: Vec<GraphEdgeSnapshot>,
 }
 
 impl GraphBuilder {
@@ -277,6 +311,8 @@ impl GraphBuilder {
             nodes: Vec::new(),
             channel_capacity: 8,
             next_id_by_kind: BTreeMap::new(),
+            node_specs: Vec::new(),
+            edges: Vec::new(),
         }
     }
 
@@ -307,6 +343,8 @@ impl GraphBuilder {
     ) -> NodeHandle<Node> {
         let node_id = NodeId(self.nodes.len());
         let factory = PortFactory { node_id };
+        let config_json =
+            facet_json::to_string(&config).expect("node config should serialize to facet json");
 
         self.nodes.push(NodeRegistration {
             name: Node::KIND,
@@ -319,6 +357,11 @@ impl GraphBuilder {
             }),
             inputs: BTreeMap::new(),
             outputs: BTreeMap::new(),
+        });
+        self.node_specs.push(GraphNodeSnapshot {
+            id: assigned_id.clone(),
+            kind: Node::KIND,
+            config_json,
         });
 
         NodeHandle {
@@ -333,6 +376,8 @@ impl GraphBuilder {
         source: OutputPort<T>,
         target: InputPort<T>,
     ) -> Result<(), GraphError> {
+        let source_node_id = source.node_id.0;
+        let source_port_name = source.name;
         let sender = self.attach_output(source)?;
         let target_node = self
             .nodes
@@ -348,6 +393,22 @@ impl GraphBuilder {
 
         let (_sender, receiver) = sender;
         target_node.inputs.insert(target.name, Box::new(receiver));
+        let from_node = self
+            .node_specs
+            .get(source_node_id)
+            .map(|node| node.id.clone())
+            .ok_or_else(|| GraphError::Validation("source node metadata did not exist".into()))?;
+        let to_node = self
+            .node_specs
+            .get(target.node_id.0)
+            .map(|node| node.id.clone())
+            .ok_or_else(|| GraphError::Validation("target node metadata did not exist".into()))?;
+        self.edges.push(GraphEdgeSnapshot {
+            from_node,
+            from_port: source_port_name,
+            to_node,
+            to_port: target.name,
+        });
         Ok(())
     }
 
@@ -363,6 +424,13 @@ impl GraphBuilder {
         Graph { nodes: self.nodes }
     }
 
+    pub fn spec_snapshot(&self) -> GraphSpecSnapshot {
+        GraphSpecSnapshot {
+            nodes: self.node_specs.clone(),
+            edges: self.edges.clone(),
+        }
+    }
+
     fn attach_output<T: Send + 'static>(
         &mut self,
         source: OutputPort<T>,
@@ -372,17 +440,21 @@ impl GraphBuilder {
             .get_mut(source.node_id.0)
             .ok_or_else(|| GraphError::Validation("source node did not exist".into()))?;
 
-        if source_node.outputs.contains_key(source.name) {
-            return Err(GraphError::PortAlreadyConnected {
-                node: source_node.name,
-                port: source.name,
-            });
+        if let Some(existing) = source_node.outputs.get_mut(source.name) {
+            let senders = existing
+                .downcast_mut::<Vec<mpsc::Sender<T>>>()
+                .ok_or_else(|| GraphError::Validation(format!(
+                    "output port `{}` on node `{}` had an unexpected runtime type",
+                    source.name, source_node.name
+                )))?;
+
+            let (sender, receiver) = mpsc::channel(self.channel_capacity);
+            senders.push(sender);
+            return Ok((senders.last().expect("sender inserted").clone(), receiver));
         }
 
         let (sender, receiver) = mpsc::channel(self.channel_capacity);
-        source_node
-            .outputs
-            .insert(source.name, Box::new(sender.clone()));
+        source_node.outputs.insert(source.name, Box::new(vec![sender.clone()]));
         Ok((sender, receiver))
     }
 }

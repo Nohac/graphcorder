@@ -115,7 +115,12 @@ fn derive_ports(input: TokenStream, kind: PortKind) -> TokenStream {
             let send_fields = fields.iter().map(|field| {
                 let name = field.ident.as_ref().expect("named field");
                 let lit = name.to_string();
+                let ty = &field.ty;
                 quote! {
+                    let _: fn() = || {
+                        fn assert_clone<T: Clone>() {}
+                        assert_clone::<#ty>();
+                    };
                     runtime.send(#lit, self.#name).await?;
                 }
             });
