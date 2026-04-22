@@ -69,7 +69,7 @@ fn derive_ports(input: TokenStream, kind: PortKind) -> TokenStream {
         quote! {
             ::graphcorder::framework::PortSchema {
                 name: #lit,
-                schema: schemars::schema_for!(#ty),
+                schema: facet_json_schema::schema_for::<#ty>(),
             }
         }
     });

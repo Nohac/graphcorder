@@ -5,7 +5,8 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 
-use schemars::{JsonSchema, Schema};
+use facet::Facet;
+use facet_json_schema::JsonSchema;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
@@ -99,7 +100,7 @@ impl PortFactory {
 #[derive(Clone, Debug)]
 pub struct PortSchema {
     pub name: &'static str,
-    pub schema: Schema,
+    pub schema: JsonSchema,
 }
 
 pub trait NodeInputs: Send + Sized + 'static {
@@ -126,7 +127,7 @@ pub trait NodeOutputs: Send + Sized + 'static {
 }
 
 pub trait NodeDefinition: Send + Sync + 'static {
-    type Config: Clone + Send + Sync + JsonSchema + 'static;
+    type Config: Clone + Send + Sync + Facet<'static> + 'static;
     type Input: NodeInputs;
     type Output: NodeOutputs;
 

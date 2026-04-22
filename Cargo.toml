@@ -7,8 +7,9 @@ edition = "2024"
 members = ["graphcorder_derive"]
 
 [dependencies]
+facet = "0.46.0"
+facet-json = "0.46.0"
+facet-json-schema = "0.46.0"
+facet-pretty = "0.46.0"
 graphcorder_derive = { path = "graphcorder_derive" }
-schemars = "1"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

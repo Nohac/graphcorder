@@ -1,20 +1,19 @@
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use facet::Facet;
 
 use crate::framework::{GraphError, NodeDefinition};
 use crate::{NodeInputs, NodeOutputs};
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Facet)]
 pub struct ScaleConfig {
     pub factor: f32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, NodeInputs)]
+#[derive(Clone, Debug, Facet, NodeInputs)]
 pub struct ScaleInput {
     pub value: f32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, NodeOutputs)]
+#[derive(Clone, Debug, Facet, NodeOutputs)]
 pub struct ScaleOutput {
     pub result: f32,
 }
