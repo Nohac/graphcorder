@@ -1,34 +1,22 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::framework::{
-    GraphError, InputPort, InputRuntime, NodeDefinition, NodeInputs, NodeOutputs, OutputPort,
-    OutputRuntime, PortFactory, PortSchema,
-};
+use crate::framework::{GraphError, NodeDefinition};
+use crate::{NodeInputs, NodeOutputs};
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ScaleConfig {
     pub factor: f32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, NodeInputs)]
 pub struct ScaleInput {
     pub value: f32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, NodeOutputs)]
 pub struct ScaleOutput {
     pub result: f32,
-}
-
-#[derive(Clone, Copy)]
-pub struct ScaleInputPorts {
-    pub value: InputPort<f32>,
-}
-
-#[derive(Clone, Copy)]
-pub struct ScaleOutputPorts {
-    pub result: OutputPort<f32>,
 }
 
 pub struct ScaleNode;
@@ -48,54 +36,5 @@ impl NodeDefinition for ScaleNode {
         Ok(ScaleOutput {
             result: input.value * config.factor,
         })
-    }
-}
-
-impl NodeInputs for ScaleInput {
-    type Ports = ScaleInputPorts;
-
-    fn ports(factory: &PortFactory) -> Self::Ports {
-        ScaleInputPorts {
-            value: factory.input("value"),
-        }
-    }
-
-    fn schema() -> Vec<PortSchema> {
-        vec![PortSchema {
-            name: "value",
-            json_type: "number",
-        }]
-    }
-
-    async fn receive(
-        runtime: &mut InputRuntime,
-    ) -> Result<Self, GraphError> {
-        Ok(Self {
-            value: runtime.receive("value").await?,
-        })
-    }
-}
-
-impl NodeOutputs for ScaleOutput {
-    type Ports = ScaleOutputPorts;
-
-    fn ports(factory: &PortFactory) -> Self::Ports {
-        ScaleOutputPorts {
-            result: factory.output("result"),
-        }
-    }
-
-    fn schema() -> Vec<PortSchema> {
-        vec![PortSchema {
-            name: "result",
-            json_type: "number",
-        }]
-    }
-
-    async fn send(
-        self,
-        runtime: &mut OutputRuntime,
-    ) -> Result<(), GraphError> {
-        runtime.send("result", self.result).await
     }
 }

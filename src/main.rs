@@ -4,10 +4,8 @@ use graphcorder::pipeline::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (graph, mut result) = build_programmatic_graph(
-        ProducerConfig { value: 6.0 },
-        ScaleConfig { factor: 1.5 },
-    )?;
+    let (graph, mut result) =
+        build_programmatic_graph(ProducerConfig { value: 6.0 }, ScaleConfig { factor: 1.5 })?;
 
     let run = tokio::spawn(graph.run());
     if let Some(value) = result.recv().await {
@@ -17,8 +15,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let json = serde_json::json!({
         "nodes": [
-            { "kind": "producer", "id": "producer_1", "config": { "value": 8.0 } },
-            { "kind": "scale", "id": "scale_1", "config": { "factor": 0.25 } }
+            { "kind": "producer", "id": "producer_1", "config": { "value": 6.0 } },
+            { "kind": "scale", "id": "scale_1", "config": { "factor": 1.5 } }
         ],
         "edges": [
             {
@@ -30,6 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .to_string();
 
     let (graph, mut result, _) = build_graph_from_json(&json)?;
+    println!("{:?}", graph);
     let run = tokio::spawn(graph.run());
     if let Some(value) = result.recv().await {
         println!("json result: {value}");

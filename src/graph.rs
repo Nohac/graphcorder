@@ -5,7 +5,7 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
@@ -99,7 +99,7 @@ impl PortFactory {
 #[derive(Clone, Debug)]
 pub struct PortSchema {
     pub name: &'static str,
-    pub json_type: &'static str,
+    pub schema: Schema,
 }
 
 pub trait NodeInputs: Send + Sized + 'static {
@@ -110,9 +110,8 @@ pub trait NodeInputs: Send + Sized + 'static {
     fn no_runtime_inputs() -> bool {
         false
     }
-    fn receive(
-        runtime: &mut InputRuntime,
-    ) -> impl Future<Output = Result<Self, GraphError>> + Send;
+    fn receive(runtime: &mut InputRuntime)
+    -> impl Future<Output = Result<Self, GraphError>> + Send;
 }
 
 pub trait NodeOutputs: Send + Sized + 'static {
@@ -155,22 +154,29 @@ impl InputRuntime {
         &mut self,
         port: &'static str,
     ) -> Result<T, GraphError> {
-        let receiver = self.ports.remove(port).ok_or(GraphError::MissingInputPort {
-            node: self.node_name,
-            port,
-        })?;
+        let receiver = self
+            .ports
+            .remove(port)
+            .ok_or(GraphError::MissingInputPort {
+                node: self.node_name,
+                port,
+            })?;
 
-        let mut receiver = receiver.downcast::<mpsc::Receiver<T>>().map(|boxed| *boxed).map_err(|_| {
-            GraphError::NodeExecution {
+        let mut receiver = receiver
+            .downcast::<mpsc::Receiver<T>>()
+            .map(|boxed| *boxed)
+            .map_err(|_| GraphError::NodeExecution {
                 node: self.node_name,
                 message: format!("input port `{port}` had an unexpected runtime type"),
-            }
-        })?;
+            })?;
 
-        receiver.recv().await.ok_or_else(|| GraphError::NodeExecution {
-            node: self.node_name,
-            message: format!("input port `{port}` closed before producing a value"),
-        })
+        receiver
+            .recv()
+            .await
+            .ok_or_else(|| GraphError::NodeExecution {
+                node: self.node_name,
+                message: format!("input port `{port}` closed before producing a value"),
+            })
     }
 }
 
@@ -185,22 +191,29 @@ impl OutputRuntime {
         port: &'static str,
         value: T,
     ) -> Result<(), GraphError> {
-        let sender = self.ports.remove(port).ok_or(GraphError::MissingOutputPort {
-            node: self.node_name,
-            port,
-        })?;
+        let sender = self
+            .ports
+            .remove(port)
+            .ok_or(GraphError::MissingOutputPort {
+                node: self.node_name,
+                port,
+            })?;
 
-        let sender = sender.downcast::<mpsc::Sender<T>>().map(|boxed| *boxed).map_err(|_| {
-            GraphError::NodeExecution {
+        let sender = sender
+            .downcast::<mpsc::Sender<T>>()
+            .map(|boxed| *boxed)
+            .map_err(|_| GraphError::NodeExecution {
                 node: self.node_name,
                 message: format!("output port `{port}` had an unexpected runtime type"),
-            }
-        })?;
+            })?;
 
-        sender.send(value).await.map_err(|_| GraphError::NodeExecution {
-            node: self.node_name,
-            message: format!("output port `{port}` receiver was closed"),
-        })
+        sender
+            .send(value)
+            .await
+            .map_err(|_| GraphError::NodeExecution {
+                node: self.node_name,
+                message: format!("output port `{port}` receiver was closed"),
+            })
     }
 }
 
@@ -340,7 +353,9 @@ impl GraphBuilder {
         }
 
         let (sender, receiver) = mpsc::channel(self.channel_capacity);
-        source_node.outputs.insert(source.name, Box::new(sender.clone()));
+        source_node
+            .outputs
+            .insert(source.name, Box::new(sender.clone()));
         Ok((sender, receiver))
     }
 }
