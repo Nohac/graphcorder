@@ -48,8 +48,12 @@ fn derive_ports(input: TokenStream, kind: PortKind) -> TokenStream {
         let name = field.ident.as_ref().expect("named field");
         let ty = &field.ty;
         match kind {
-            PortKind::Input => quote! { pub #name: ::graphcorder::framework::InputPort<#ty> },
-            PortKind::Output => quote! { pub #name: ::graphcorder::framework::OutputPort<#ty> },
+            PortKind::Input => {
+                quote! { pub #name: ::graphcorder::framework::InputPort<<#ty as ::graphcorder::framework::InputPortValue>::EdgeValue> }
+            }
+            PortKind::Output => {
+                quote! { pub #name: ::graphcorder::framework::OutputPort<<#ty as ::graphcorder::framework::OutputPortValue>::EdgeValue> }
+            }
         }
     });
 
@@ -66,11 +70,13 @@ fn derive_ports(input: TokenStream, kind: PortKind) -> TokenStream {
         let name = field.ident.as_ref().expect("named field");
         let ty = &field.ty;
         let lit = name.to_string();
-        quote! {
-            ::graphcorder::framework::PortSchema {
-                name: #lit,
-                schema: facet_json_schema::schema_for::<#ty>(),
-            }
+        match kind {
+            PortKind::Input => quote! {
+                <#ty as ::graphcorder::framework::InputPortValue>::schema(#lit)
+            },
+            PortKind::Output => quote! {
+                <#ty as ::graphcorder::framework::OutputPortValue>::schema(#lit)
+            },
         }
     });
 
@@ -79,7 +85,14 @@ fn derive_ports(input: TokenStream, kind: PortKind) -> TokenStream {
             let receive_fields = fields.iter().map(|field| {
                 let name = field.ident.as_ref().expect("named field");
                 let lit = name.to_string();
-                quote! { #name: runtime.receive(#lit).await? }
+                let ty = &field.ty;
+                quote! { #name: <#ty as ::graphcorder::framework::InputPortValue>::receive(runtime, #lit).await? }
+            });
+
+            let input_match_arms = fields.iter().map(|field| {
+                let name = field.ident.as_ref().expect("named field");
+                let lit = name.to_string();
+                quote! { #lit => Some(::graphcorder::framework::ErasedInputPort::new(self.#name)), }
             });
 
             quote! {
@@ -109,6 +122,18 @@ fn derive_ports(input: TokenStream, kind: PortKind) -> TokenStream {
                         })
                     }
                 }
+
+                impl ::graphcorder::framework::ErasedInputPorts for #ports_name {
+                    fn input_port<R: ::graphcorder::framework::RegisteredNodeSpec>(
+                        &self,
+                        name: &str,
+                    ) -> Option<::graphcorder::framework::ErasedInputPort<R>> {
+                        match name {
+                            #( #input_match_arms )*
+                            _ => None,
+                        }
+                    }
+                }
             }
         }
         PortKind::Output => {
@@ -117,12 +142,14 @@ fn derive_ports(input: TokenStream, kind: PortKind) -> TokenStream {
                 let lit = name.to_string();
                 let ty = &field.ty;
                 quote! {
-                    let _: fn() = || {
-                        fn assert_clone<T: Clone>() {}
-                        assert_clone::<#ty>();
-                    };
-                    runtime.send(#lit, self.#name).await?;
+                    <#ty as ::graphcorder::framework::OutputPortValue>::send(self.#name, runtime, #lit).await?;
                 }
+            });
+
+            let output_match_arms = fields.iter().map(|field| {
+                let name = field.ident.as_ref().expect("named field");
+                let lit = name.to_string();
+                quote! { #lit => Some(::graphcorder::framework::ErasedOutputPort::new(self.#name)), }
             });
 
             quote! {
@@ -150,6 +177,18 @@ fn derive_ports(input: TokenStream, kind: PortKind) -> TokenStream {
                     ) -> Result<(), ::graphcorder::framework::GraphError> {
                         #( #send_fields )*
                         Ok(())
+                    }
+                }
+
+                impl ::graphcorder::framework::ErasedOutputPorts for #ports_name {
+                    fn output_port(
+                        &self,
+                        name: &str,
+                    ) -> Option<::graphcorder::framework::ErasedOutputPort> {
+                        match name {
+                            #( #output_match_arms )*
+                            _ => None,
+                        }
                     }
                 }
             }

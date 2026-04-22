@@ -1,4 +1,5 @@
 use std::any::Any;
+use std::any::TypeId;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use std::future::Future;
@@ -60,18 +61,34 @@ impl Display for GraphError {
 
 impl std::error::Error for GraphError {}
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct InputPort<T> {
     node_id: NodeId,
     name: &'static str,
     _marker: PhantomData<fn() -> T>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+impl<T> Copy for InputPort<T> {}
+
+impl<T> Clone for InputPort<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
 pub struct OutputPort<T> {
     node_id: NodeId,
     name: &'static str,
     _marker: PhantomData<fn() -> T>,
+}
+
+impl<T> Copy for OutputPort<T> {}
+
+impl<T> Clone for OutputPort<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -98,9 +115,17 @@ impl PortFactory {
 }
 
 #[derive(Clone, Debug)]
+pub enum PortCardinality {
+    Single,
+    Many,
+    Fixed(usize),
+}
+
+#[derive(Clone, Debug)]
 pub struct PortSchema {
     pub name: &'static str,
     pub schema: JsonSchema,
+    pub cardinality: PortCardinality,
 }
 
 #[derive(Clone, Debug, Facet)]
@@ -164,6 +189,73 @@ pub trait NodeOutputs: Send + Sized + 'static {
     ) -> impl Future<Output = Result<(), GraphError>> + Send;
 }
 
+pub trait PortValue: Clone + Send + Sync + Facet<'static> + 'static {}
+
+macro_rules! impl_port_value {
+    ($($ty:ty),* $(,)?) => {
+        $(impl PortValue for $ty {})*
+    };
+}
+
+impl_port_value!(f32, f64, usize, u32, u64, i32, i64, bool, String);
+
+impl<T: PortValue> PortValue for Vec<T> {}
+
+impl<T: PortValue, const N: usize> PortValue for [T; N] {}
+
+pub trait InputPortValue: Send + Sized + 'static {
+    type EdgeValue: Send + 'static;
+
+    fn schema(name: &'static str) -> PortSchema;
+    fn receive(
+        runtime: &mut InputRuntime,
+        port: &'static str,
+    ) -> impl Future<Output = Result<Self, GraphError>> + Send;
+}
+
+impl<T: PortValue> InputPortValue for T {
+    type EdgeValue = T;
+
+    fn schema(name: &'static str) -> PortSchema {
+        PortSchema {
+            name,
+            schema: facet_json_schema::schema_for::<T>(),
+            cardinality: PortCardinality::Single,
+        }
+    }
+
+    async fn receive(runtime: &mut InputRuntime, port: &'static str) -> Result<Self, GraphError> {
+        runtime.receive_one(port).await
+    }
+}
+
+pub trait OutputPortValue: Send + Sized + 'static {
+    type EdgeValue: Clone + Send + 'static;
+
+    fn schema(name: &'static str) -> PortSchema;
+    fn send(
+        self,
+        runtime: &mut OutputRuntime,
+        port: &'static str,
+    ) -> impl Future<Output = Result<(), GraphError>> + Send;
+}
+
+impl<T: PortValue> OutputPortValue for T {
+    type EdgeValue = T;
+
+    fn schema(name: &'static str) -> PortSchema {
+        PortSchema {
+            name,
+            schema: facet_json_schema::schema_for::<T>(),
+            cardinality: PortCardinality::Single,
+        }
+    }
+
+    async fn send(self, runtime: &mut OutputRuntime, port: &'static str) -> Result<(), GraphError> {
+        runtime.send(port, self).await
+    }
+}
+
 pub trait NodeDefinition: Send + Sync + 'static {
     type Config: Clone + Send + Sync + Facet<'static> + 'static;
     type Input: NodeInputs;
@@ -187,21 +279,123 @@ pub trait GraphNodeSpec {
     fn into_parts(self) -> (Self::Node, <Self::Node as NodeDefinition>::Config);
 }
 
-pub trait RegisteredNodeSpec: Clone + Send + Sync + Facet<'static> + 'static {
-    type BuiltNode: BuiltNode<Self>;
-
-    fn id(&self) -> &str;
-    fn add_to_builder(&self, builder: &mut GraphBuilder<Self>) -> Self::BuiltNode;
+pub struct ErasedInputPort<R> {
+    type_id: TypeId,
+    inner: Box<dyn Any + Send>,
+    connect: fn(&mut GraphBuilder<R>, &dyn Any, &dyn Any) -> Result<(), GraphError>,
 }
 
-pub trait BuiltNode<R: RegisteredNodeSpec> {
+impl<R: RegisteredNodeSpec> ErasedInputPort<R> {
+    pub fn new<T: Send + 'static>(port: InputPort<T>) -> Self {
+        Self {
+            type_id: TypeId::of::<T>(),
+            inner: Box::new(port),
+            connect: |builder, source, target| {
+                let source = source
+                    .downcast_ref::<OutputPort<T>>()
+                    .ok_or_else(|| GraphError::Validation("output port type mismatch".into()))?;
+                let target = target
+                    .downcast_ref::<InputPort<T>>()
+                    .ok_or_else(|| GraphError::Validation("input port type mismatch".into()))?;
+                builder.connect(*source, *target)
+            },
+        }
+    }
+}
+
+pub struct ErasedOutputPort {
+    type_id: TypeId,
+    inner: Box<dyn Any + Send>,
+}
+
+impl ErasedOutputPort {
+    pub fn new<T: Send + 'static>(port: OutputPort<T>) -> Self {
+        Self {
+            type_id: TypeId::of::<T>(),
+            inner: Box::new(port),
+        }
+    }
+}
+
+pub trait ErasedInputPorts {
+    fn input_port<R: RegisteredNodeSpec>(&self, name: &str) -> Option<ErasedInputPort<R>>;
+}
+
+pub trait ErasedOutputPorts {
+    fn output_port(&self, name: &str) -> Option<ErasedOutputPort>;
+}
+
+trait ErasedBuiltNode<R: RegisteredNodeSpec>: Send {
+    fn input_port(&self, name: &str) -> Option<ErasedInputPort<R>>;
+    fn output_port(&self, name: &str) -> Option<ErasedOutputPort>;
+}
+
+struct BuiltNodeAdapter<I, O> {
+    input: I,
+    output: O,
+}
+
+impl<R, I, O> ErasedBuiltNode<R> for BuiltNodeAdapter<I, O>
+where
+    R: RegisteredNodeSpec,
+    I: ErasedInputPorts + Send,
+    O: ErasedOutputPorts + Send,
+{
+    fn input_port(&self, name: &str) -> Option<ErasedInputPort<R>> {
+        self.input.input_port::<R>(name)
+    }
+
+    fn output_port(&self, name: &str) -> Option<ErasedOutputPort> {
+        self.output.output_port(name)
+    }
+}
+
+pub struct BuiltGraphNode<R: RegisteredNodeSpec> {
+    inner: Box<dyn ErasedBuiltNode<R>>,
+}
+
+impl<R: RegisteredNodeSpec> BuiltGraphNode<R> {
+    pub fn from_handle<Node>(handle: NodeHandle<Node>) -> Self
+    where
+        Node: NodeDefinition,
+        <Node::Input as NodeInputs>::Ports: ErasedInputPorts + Send + 'static,
+        <Node::Output as NodeOutputs>::Ports: ErasedOutputPorts + Send + 'static,
+    {
+        Self {
+            inner: Box::new(BuiltNodeAdapter {
+                input: handle.input,
+                output: handle.output,
+            }),
+        }
+    }
+
     fn connect_to(
         &self,
         builder: &mut GraphBuilder<R>,
         from_port: &str,
-        target: &R::BuiltNode,
+        target: &BuiltGraphNode<R>,
         to_port: &str,
-    ) -> Result<(), GraphError>;
+    ) -> Result<(), GraphError> {
+        let source = self.inner.output_port(from_port).ok_or_else(|| {
+            GraphError::Validation(format!("missing output port `{from_port}`"))
+        })?;
+        let target = target.inner.input_port(to_port).ok_or_else(|| {
+            GraphError::Validation(format!("missing input port `{to_port}`"))
+        })?;
+
+        if source.type_id != target.type_id {
+            return Err(GraphError::Validation(format!(
+                "type mismatch connecting `{from_port}` to `{to_port}`"
+            )));
+        }
+
+        (target.connect)(builder, source.inner.as_ref(), target.inner.as_ref())
+    }
+}
+
+pub trait RegisteredNodeSpec: Clone + Send + Sync + Facet<'static> + 'static {
+    fn id(&self) -> &str;
+    fn add_to_builder(&self, builder: &mut GraphBuilder<Self>) -> BuiltGraphNode<Self>;
 }
 
 pub struct NodeHandle<Node: NodeDefinition> {
@@ -212,15 +406,15 @@ pub struct NodeHandle<Node: NodeDefinition> {
 
 pub struct InputRuntime {
     node_name: &'static str,
-    ports: BTreeMap<&'static str, Box<dyn Any + Send>>,
+    ports: BTreeMap<&'static str, Vec<Box<dyn Any + Send>>>,
 }
 
 impl InputRuntime {
-    pub async fn receive<T: Send + 'static>(
+    async fn take_receivers<T: Send + 'static>(
         &mut self,
         port: &'static str,
-    ) -> Result<T, GraphError> {
-        let receiver = self
+    ) -> Result<Vec<mpsc::Receiver<T>>, GraphError> {
+        let receivers = self
             .ports
             .remove(port)
             .ok_or(GraphError::MissingInputPort {
@@ -228,13 +422,33 @@ impl InputRuntime {
                 port,
             })?;
 
-        let mut receiver = receiver
-            .downcast::<mpsc::Receiver<T>>()
-            .map(|boxed| *boxed)
-            .map_err(|_| GraphError::NodeExecution {
+        receivers
+            .into_iter()
+            .map(|receiver| {
+                receiver
+                    .downcast::<mpsc::Receiver<T>>()
+                    .map(|boxed| *boxed)
+                    .map_err(|_| GraphError::NodeExecution {
+                        node: self.node_name,
+                        message: format!("input port `{port}` had an unexpected runtime type"),
+                    })
+            })
+            .collect()
+    }
+
+    pub async fn receive_one<T: Send + 'static>(
+        &mut self,
+        port: &'static str,
+    ) -> Result<T, GraphError> {
+        let mut receivers = self.take_receivers(port).await?;
+        if receivers.len() != 1 {
+            return Err(GraphError::NodeExecution {
                 node: self.node_name,
-                message: format!("input port `{port}` had an unexpected runtime type"),
-            })?;
+                message: format!("input port `{port}` expected exactly one connection"),
+            });
+        }
+
+        let mut receiver = receivers.remove(0);
 
         receiver
             .recv()
@@ -243,6 +457,48 @@ impl InputRuntime {
                 node: self.node_name,
                 message: format!("input port `{port}` closed before producing a value"),
             })
+    }
+
+    pub async fn receive_many<T: Send + 'static>(
+        &mut self,
+        port: &'static str,
+    ) -> Result<Vec<T>, GraphError> {
+        let mut values = Vec::new();
+        for mut receiver in self.take_receivers(port).await? {
+            let value = receiver.recv().await.ok_or_else(|| GraphError::NodeExecution {
+                node: self.node_name,
+                message: format!("input port `{port}` closed before producing a value"),
+            })?;
+            values.push(value);
+        }
+        Ok(values)
+    }
+
+    pub async fn receive_fixed<T: Send + 'static>(
+        &mut self,
+        port: &'static str,
+        expected: usize,
+    ) -> Result<Vec<T>, GraphError> {
+        let receivers = self.take_receivers::<T>(port).await?;
+        if receivers.len() != expected {
+            return Err(GraphError::NodeExecution {
+                node: self.node_name,
+                message: format!(
+                    "input port `{port}` expected {expected} connections but got {}",
+                    receivers.len()
+                ),
+            });
+        }
+
+        let mut values = Vec::with_capacity(expected);
+        for mut receiver in receivers {
+            let value = receiver.recv().await.ok_or_else(|| GraphError::NodeExecution {
+                node: self.node_name,
+                message: format!("input port `{port}` closed before producing a value"),
+            })?;
+            values.push(value);
+        }
+        Ok(values)
     }
 }
 
@@ -297,7 +553,8 @@ impl OutputRuntime {
 struct NodeRegistration {
     name: &'static str,
     task: Box<dyn FnOnce(InputRuntime, OutputRuntime) -> NodeFuture + Send>,
-    inputs: BTreeMap<&'static str, Box<dyn Any + Send>>,
+    input_schemas: BTreeMap<&'static str, PortSchema>,
+    inputs: BTreeMap<&'static str, Vec<Box<dyn Any + Send>>>,
     outputs: BTreeMap<&'static str, Box<dyn Any + Send>>,
 }
 
@@ -392,6 +649,10 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
                     output.send(&mut outputs).await
                 })
             }),
+            input_schemas: Node::Input::schema()
+                .into_iter()
+                .map(|schema| (schema.name, schema))
+                .collect(),
             inputs: BTreeMap::new(),
             outputs: BTreeMap::new(),
         });
@@ -416,15 +677,44 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
             .get_mut(target.node_id.0)
             .ok_or_else(|| GraphError::Validation("target node did not exist".into()))?;
 
-        if target_node.inputs.contains_key(target.name) {
-            return Err(GraphError::PortAlreadyConnected {
+        let cardinality = target_node
+            .input_schemas
+            .get(target.name)
+            .ok_or(GraphError::MissingInputPort {
                 node: target_node.name,
                 port: target.name,
-            });
+            })?
+            .cardinality
+            .clone();
+
+        let existing_connection_count = target_node
+            .inputs
+            .get(target.name)
+            .map(|connections| connections.len())
+            .unwrap_or(0);
+
+        match cardinality {
+            PortCardinality::Single if existing_connection_count > 0 => {
+                return Err(GraphError::PortAlreadyConnected {
+                    node: target_node.name,
+                    port: target.name,
+                });
+            }
+            PortCardinality::Fixed(limit) if existing_connection_count >= limit => {
+                return Err(GraphError::Validation(format!(
+                    "input port `{}` on node `{}` accepts at most {limit} connections",
+                    target.name, target_node.name
+                )));
+            }
+            _ => {}
         }
 
         let (_sender, receiver) = sender;
-        target_node.inputs.insert(target.name, Box::new(receiver));
+        target_node
+            .inputs
+            .entry(target.name)
+            .or_default()
+            .push(Box::new(receiver));
         let from_node = self
             .node_specs
             .get(source_node_id)
@@ -579,6 +869,12 @@ impl NodeInputs for () {
     }
 }
 
+impl ErasedInputPorts for () {
+    fn input_port<R: RegisteredNodeSpec>(&self, _name: &str) -> Option<ErasedInputPort<R>> {
+        None
+    }
+}
+
 impl NodeOutputs for () {
     type Ports = ();
 
@@ -590,5 +886,11 @@ impl NodeOutputs for () {
 
     async fn send(self, _runtime: &mut OutputRuntime) -> Result<(), GraphError> {
         Ok(())
+    }
+}
+
+impl ErasedOutputPorts for () {
+    fn output_port(&self, _name: &str) -> Option<ErasedOutputPort> {
+        None
     }
 }

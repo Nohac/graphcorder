@@ -4,14 +4,14 @@ use facet_pretty::FacetPretty;
 use graphcorder::{
     NodeInputs, NodeOutputs,
     framework::{
-        BuiltNode, GraphError, GraphNode, GraphNodeSpec, GraphSpec, NodeDefinition, NodeHandle,
+        BuiltGraphNode, GraphError, GraphNode, GraphNodeSpec, GraphSpec, NodeDefinition,
         RegisteredNodeSpec,
     },
 };
 
 #[derive(Clone, Debug, Facet)]
 struct ProducerConfig {
-    value: f32,
+    value: Vec<f32>,
 }
 
 #[derive(Clone, Debug, Facet)]
@@ -21,7 +21,7 @@ struct ProducerNodeSpec {
 
 #[derive(Clone, Debug, Facet, NodeOutputs)]
 struct ProducerOutput {
-    value: f32,
+    value: Vec<f32>,
 }
 
 struct ProducerNode;
@@ -45,7 +45,7 @@ impl NodeDefinition for ProducerNode {
         config: &Self::Config,
     ) -> Result<Self::Output, GraphError> {
         Ok(ProducerOutput {
-            value: config.value,
+            value: config.value.to_owned(),
         })
     }
 }
@@ -79,12 +79,12 @@ struct ScaleNodeSpec {
 
 #[derive(Clone, Debug, Facet, NodeInputs)]
 struct ScaleInput {
-    value: f32,
+    value: Vec<f32>,
 }
 
 #[derive(Clone, Debug, Facet, NodeOutputs)]
 struct ScaleOutput {
-    result: f32,
+    result: Vec<f32>,
 }
 
 struct ScaleNode;
@@ -108,7 +108,7 @@ impl NodeDefinition for ScaleNode {
         config: &Self::Config,
     ) -> Result<Self::Output, GraphError> {
         Ok(ScaleOutput {
-            result: input.value * config.factor,
+            result: input.value.into_iter().map(|v| v * config.factor).collect(),
         })
     }
 }
@@ -142,7 +142,7 @@ struct PrintNodeSpec {
 
 #[derive(Clone, Debug, Facet, NodeInputs)]
 struct PrintInput {
-    value: f32,
+    value: Vec<f32>,
 }
 
 struct PrintNode;
@@ -165,7 +165,7 @@ impl NodeDefinition for PrintNode {
         input: Self::Input,
         config: &Self::Config,
     ) -> Result<Self::Output, GraphError> {
-        println!("{}: {}", config.label, input.value);
+        println!("{}: {:?}", config.label, input.value,);
         Ok(())
     }
 }
@@ -193,7 +193,7 @@ trait ExampleNodeRegistry {
     fn add_to_builder(
         &self,
         builder: &mut graphcorder::framework::GraphBuilder<Node>,
-    ) -> BuiltNodeHandle;
+    ) -> BuiltGraphNode<Node>;
 }
 
 #[repr(C)]
@@ -213,8 +213,8 @@ impl ExampleNodeRegistry for GraphNode<ProducerConfig> {
     fn add_to_builder(
         &self,
         builder: &mut graphcorder::framework::GraphBuilder<Node>,
-    ) -> BuiltNodeHandle {
-        BuiltNodeHandle::Producer(builder.add(ProducerNodeSpec::new(self.config.clone())))
+    ) -> BuiltGraphNode<Node> {
+        BuiltGraphNode::from_handle(builder.add(ProducerNodeSpec::new(self.config.clone())))
     }
 }
 
@@ -226,8 +226,8 @@ impl ExampleNodeRegistry for GraphNode<ScaleConfig> {
     fn add_to_builder(
         &self,
         builder: &mut graphcorder::framework::GraphBuilder<Node>,
-    ) -> BuiltNodeHandle {
-        BuiltNodeHandle::Scale(builder.add(ScaleNodeSpec::new(self.config.clone())))
+    ) -> BuiltGraphNode<Node> {
+        BuiltGraphNode::from_handle(builder.add(ScaleNodeSpec::new(self.config.clone())))
     }
 }
 
@@ -239,43 +239,12 @@ impl ExampleNodeRegistry for GraphNode<PrintConfig> {
     fn add_to_builder(
         &self,
         builder: &mut graphcorder::framework::GraphBuilder<Node>,
-    ) -> BuiltNodeHandle {
-        BuiltNodeHandle::Print(builder.add(PrintNodeSpec::new(self.config.clone())))
-    }
-}
-
-enum BuiltNodeHandle {
-    Producer(NodeHandle<ProducerNode>),
-    Scale(NodeHandle<ScaleNode>),
-    Print(NodeHandle<PrintNode>),
-}
-
-impl BuiltNode<Node> for BuiltNodeHandle {
-    fn connect_to(
-        &self,
-        builder: &mut graphcorder::framework::GraphBuilder<Node>,
-        from_port: &str,
-        target: &BuiltNodeHandle,
-        to_port: &str,
-    ) -> Result<(), GraphError> {
-        match (self, from_port, target, to_port) {
-            (BuiltNodeHandle::Producer(source), "value", BuiltNodeHandle::Scale(target), "value") => {
-                builder.connect(source.output.value, target.input.value)
-            }
-            (BuiltNodeHandle::Scale(source), "result", BuiltNodeHandle::Print(target), "value") => {
-                builder.connect(source.output.result, target.input.value)
-            }
-            _ => Err(GraphError::Validation(format!(
-                "unsupported edge {} -> {}",
-                from_port, to_port
-            ))),
-        }
+    ) -> BuiltGraphNode<Node> {
+        BuiltGraphNode::from_handle(builder.add(PrintNodeSpec::new(self.config.clone())))
     }
 }
 
 impl RegisteredNodeSpec for Node {
-    type BuiltNode = BuiltNodeHandle;
-
     fn id(&self) -> &str {
         ExampleNodeRegistry::id(self)
     }
@@ -283,7 +252,7 @@ impl RegisteredNodeSpec for Node {
     fn add_to_builder(
         &self,
         builder: &mut graphcorder::framework::GraphBuilder<Node>,
-    ) -> Self::BuiltNode {
+    ) -> BuiltGraphNode<Node> {
         ExampleNodeRegistry::add_to_builder(self, builder)
     }
 }
@@ -293,7 +262,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let instance = graphcorder::init::<Node>();
     let mut builder = instance.builder();
 
-    let producer = builder.add(ProducerNodeSpec::new(ProducerConfig { value: 6.0 }));
+    let producer = builder.add(ProducerNodeSpec::new(ProducerConfig {
+        value: [6.0, 12.0, 18.0, 24.0].into(),
+    }));
     let scale_1x = builder.add(ScaleNodeSpec::new(ScaleConfig { factor: 1.5 }));
     let scale_2x = builder.add(ScaleNodeSpec::new(ScaleConfig { factor: 3.0 }));
     let print_1x = builder.add(PrintNodeSpec::new(PrintConfig {
@@ -311,7 +282,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let spec = builder.graph_spec();
     println!("{}", spec.pretty());
     println!("{}", facet_json::to_string_pretty(&spec)?);
-    println!("{}", facet_json::to_string_pretty(&instance.graph_schema())?);
+    println!(
+        "{}",
+        facet_json::to_string_pretty(&instance.graph_schema())?
+    );
 
     builder.build().run().await?;
 
