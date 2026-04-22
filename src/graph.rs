@@ -103,6 +103,36 @@ pub struct PortSchema {
     pub schema: JsonSchema,
 }
 
+#[derive(Clone, Debug, Facet)]
+pub struct GraphSpec<R> {
+    pub nodes: Vec<R>,
+    pub edges: Vec<EdgeSpec>,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct GraphNode<T> {
+    pub id: String,
+    pub config: T,
+}
+
+impl<T> GraphNode<T> {
+    pub fn new(id: String, config: T) -> Self {
+        Self { id, config }
+    }
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct EdgeSpec {
+    pub from: PortRef,
+    pub to: PortRef,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct PortRef {
+    pub node: String,
+    pub port: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct GraphEdgeSnapshot {
     pub from_node: String,
@@ -150,10 +180,28 @@ pub trait NodeDefinition: Send + Sync + 'static {
 
 pub trait GraphNodeSpec {
     type Node: NodeDefinition;
+    type Registry: RegisteredNodeSpec;
 
     fn kind(&self) -> &'static str;
-    fn export_node(&self, id: String) -> crate::pipeline::NodeSpec;
+    fn export_node(&self, id: String) -> Self::Registry;
     fn into_parts(self) -> (Self::Node, <Self::Node as NodeDefinition>::Config);
+}
+
+pub trait RegisteredNodeSpec: Clone + Send + Sync + Facet<'static> + 'static {
+    type BuiltNode: BuiltNode<Self>;
+
+    fn id(&self) -> &str;
+    fn add_to_builder(&self, builder: &mut GraphBuilder<Self>) -> Self::BuiltNode;
+}
+
+pub trait BuiltNode<R: RegisteredNodeSpec> {
+    fn connect_to(
+        &self,
+        builder: &mut GraphBuilder<R>,
+        from_port: &str,
+        target: &R::BuiltNode,
+        to_port: &str,
+    ) -> Result<(), GraphError>;
 }
 
 pub struct NodeHandle<Node: NodeDefinition> {
@@ -285,15 +333,15 @@ impl Graph {
     }
 }
 
-pub struct GraphBuilder {
+pub struct GraphBuilder<R> {
     nodes: Vec<NodeRegistration>,
     channel_capacity: usize,
     next_id_by_kind: BTreeMap<&'static str, usize>,
-    node_specs: Vec<crate::pipeline::NodeSpec>,
+    node_specs: Vec<R>,
     edges: Vec<GraphEdgeSnapshot>,
 }
 
-impl GraphBuilder {
+impl<R: RegisteredNodeSpec> GraphBuilder<R> {
     pub fn new() -> Self {
         Self {
             nodes: Vec::new(),
@@ -312,14 +360,17 @@ impl GraphBuilder {
     pub fn add<Spec: GraphNodeSpec>(
         &mut self,
         spec: Spec,
-    ) -> NodeHandle<Spec::Node> {
+    ) -> NodeHandle<Spec::Node>
+    where
+        Spec::Registry: Into<R>,
+    {
         let next = self
             .next_id_by_kind
             .entry(spec.kind())
             .and_modify(|count| *count += 1)
             .or_insert(1);
         let assigned_id = format!("{}_{}", spec.kind(), *next);
-        self.node_specs.push(spec.export_node(assigned_id.clone()));
+        self.node_specs.push(spec.export_node(assigned_id.clone()).into());
         let (node, config) = spec.into_parts();
         self.add_node(assigned_id, node, config)
     }
@@ -397,12 +448,33 @@ impl GraphBuilder {
         Graph { nodes: self.nodes }
     }
 
-    pub fn export_nodes(&self) -> &[crate::pipeline::NodeSpec] {
+    pub fn export_nodes(&self) -> &[R] {
         &self.node_specs
     }
 
     pub fn edges(&self) -> &[GraphEdgeSnapshot] {
         &self.edges
+    }
+
+    pub fn graph_spec(&self) -> GraphSpec<R> {
+        let nodes = self.export_nodes().to_vec();
+        let edges = self
+            .edges()
+            .iter()
+            .cloned()
+            .map(|edge| EdgeSpec {
+                from: PortRef {
+                    node: edge.from_node,
+                    port: edge.from_port.into(),
+                },
+                to: PortRef {
+                    node: edge.to_node,
+                    port: edge.to_port.into(),
+                },
+            })
+            .collect();
+
+        GraphSpec { nodes, edges }
     }
 
     fn attach_output<T: Send + 'static>(
@@ -433,9 +505,59 @@ impl GraphBuilder {
     }
 }
 
-impl Default for GraphBuilder {
+impl<R: RegisteredNodeSpec> Default for GraphBuilder<R> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+pub struct Graphcorder<R> {
+    _marker: PhantomData<fn() -> R>,
+}
+
+impl<R> Graphcorder<R> {
+    pub fn builder(&self) -> GraphBuilder<R>
+    where
+        R: RegisteredNodeSpec,
+    {
+        GraphBuilder::new()
+    }
+
+    pub fn graph_schema(&self) -> JsonSchema
+    where
+        R: RegisteredNodeSpec,
+    {
+        facet_json_schema::schema_for::<GraphSpec<R>>()
+    }
+
+    pub fn build_graph_from_spec(&self, spec: GraphSpec<R>) -> Result<Graph, GraphError>
+    where
+        R: RegisteredNodeSpec,
+    {
+        let mut builder = GraphBuilder::new();
+        let mut nodes = BTreeMap::new();
+
+        for node in &spec.nodes {
+            nodes.insert(node.id().to_owned(), node.add_to_builder(&mut builder));
+        }
+
+        for edge in &spec.edges {
+            let source = nodes.get(&edge.from.node).ok_or_else(|| {
+                GraphError::Validation(format!("missing source node `{}`", edge.from.node))
+            })?;
+            let target = nodes.get(&edge.to.node).ok_or_else(|| {
+                GraphError::Validation(format!("missing target node `{}`", edge.to.node))
+            })?;
+            source.connect_to(&mut builder, &edge.from.port, target, &edge.to.port)?;
+        }
+
+        Ok(builder.build())
+    }
+}
+
+pub fn init<R>() -> Graphcorder<R> {
+    Graphcorder {
+        _marker: PhantomData,
     }
 }
 

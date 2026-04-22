@@ -1,5 +1,6 @@
 pub use crate::graph::{
-    Graph, GraphBuilder, GraphEdgeSnapshot, GraphError, GraphNodeSpec, InputPort, InputRuntime,
-    NodeDefinition, NodeHandle, NodeInputs, NodeOutputs, OutputPort, OutputRuntime, PortFactory,
-    PortSchema,
+    BuiltNode, EdgeSpec, Graph, GraphBuilder, GraphEdgeSnapshot, GraphError, GraphNode,
+    GraphNodeSpec, GraphSpec, Graphcorder, InputPort, InputRuntime, NodeDefinition, NodeHandle,
+    NodeInputs, NodeOutputs, OutputPort, OutputRuntime, PortFactory, PortRef, PortSchema,
+    RegisteredNodeSpec, init,
 };
