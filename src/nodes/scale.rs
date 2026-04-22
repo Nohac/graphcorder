@@ -1,11 +1,17 @@
 use facet::Facet;
 
-use crate::framework::{GraphError, NodeDefinition};
+use crate::framework::{GraphError, GraphNodeSpec, NodeDefinition};
 use crate::{NodeInputs, NodeOutputs};
 
 #[derive(Clone, Debug, Facet)]
 pub struct ScaleConfig {
     pub factor: f32,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct ScaleNodeSpec {
+    pub id: String,
+    pub config: ScaleConfig,
 }
 
 #[derive(Clone, Debug, Facet, NodeInputs)]
@@ -35,5 +41,31 @@ impl NodeDefinition for ScaleNode {
         Ok(ScaleOutput {
             result: input.value * config.factor,
         })
+    }
+}
+
+impl ScaleNodeSpec {
+    pub fn new(config: ScaleConfig) -> Self {
+        Self {
+            id: String::new(),
+            config,
+        }
+    }
+
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = id.into();
+        self
+    }
+
+    pub fn id(&self) -> String {
+        self.id.clone()
+    }
+}
+
+impl GraphNodeSpec for ScaleNodeSpec {
+    type Node = ScaleNode;
+
+    fn into_parts(self) -> (Self::Node, <Self::Node as NodeDefinition>::Config) {
+        (ScaleNode, self.config)
     }
 }

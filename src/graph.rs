@@ -140,6 +140,12 @@ pub trait NodeDefinition: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Self::Output, GraphError>> + Send;
 }
 
+pub trait GraphNodeSpec {
+    type Node: NodeDefinition;
+
+    fn into_parts(self) -> (Self::Node, <Self::Node as NodeDefinition>::Config);
+}
+
 pub struct NodeHandle<Node: NodeDefinition> {
     pub input: <Node::Input as NodeInputs>::Ports,
     pub output: <Node::Output as NodeOutputs>::Ports,
@@ -275,7 +281,15 @@ impl GraphBuilder {
         self
     }
 
-    pub fn add_node<Node: NodeDefinition>(
+    pub fn add<Spec: GraphNodeSpec>(
+        &mut self,
+        spec: Spec,
+    ) -> NodeHandle<Spec::Node> {
+        let (node, config) = spec.into_parts();
+        self.add_node(node, config)
+    }
+
+    fn add_node<Node: NodeDefinition>(
         &mut self,
         node: Node,
         config: Node::Config,
