@@ -16,14 +16,19 @@ pub use crate::nodes::scale::ScaleNodeSpec;
 pub fn build_programmatic_graph(
     producer: ProducerConfig,
     scale: ScaleConfig,
-) -> Result<(Graph, mpsc::Receiver<f32>), GraphError> {
+) -> Result<(Graph, mpsc::Receiver<f32>, mpsc::Receiver<f32>), GraphError> {
     let mut builder = GraphBuilder::new();
     let producer = builder.add(ProducerNodeSpec::new(producer));
-    let scale = builder.add(ScaleNodeSpec::new(scale));
+    let scale_1x = builder.add(ScaleNodeSpec::new(scale.clone()));
+    let scale_2x = builder.add(ScaleNodeSpec::new(ScaleConfig {
+        factor: scale.factor * 2.0,
+    }));
 
-    builder.connect(producer.output.value, scale.input.value)?;
-    let result = builder.capture_output(scale.output.result)?;
-    Ok((builder.build(), result))
+    builder.connect(producer.output.value, scale_1x.input.value)?;
+    builder.connect(producer.output.value, scale_2x.input.value)?;
+    let result = builder.capture_output(scale_1x.output.result)?;
+    let result2 = builder.capture_output(scale_2x.output.result)?;
+    Ok((builder.build(), result, result2))
 }
 
 #[derive(Clone, Debug, Facet)]
@@ -35,8 +40,8 @@ pub struct GraphSpec {
 #[repr(C)]
 #[derive(Clone, Debug, Facet)]
 pub enum NodeSpec {
-    Producer(ProducerNodeSpec),
-    Scale(ScaleNodeSpec),
+    Producer(ExportedNode<ProducerConfig>),
+    Scale(ExportedNode<ScaleConfig>),
 }
 
 #[derive(Clone, Debug, Facet)]
@@ -51,6 +56,12 @@ pub struct PortRef {
     pub port: String,
 }
 
+#[derive(Clone, Debug, Facet)]
+pub struct ExportedNode<Config> {
+    pub id: String,
+    pub config: Config,
+}
+
 enum BuiltNode {
     Producer(crate::framework::NodeHandle<crate::nodes::producer::ProducerNode>),
     Scale(crate::framework::NodeHandle<crate::nodes::scale::ScaleNode>),
@@ -59,8 +70,8 @@ enum BuiltNode {
 pub fn build_graph_from_json(
     json: &str,
 ) -> Result<(Graph, mpsc::Receiver<f32>, GraphSpec), GraphError> {
-    let spec: GraphSpec =
-        from_str(json).map_err(|error| GraphError::Validation(format!("invalid graph json: {error}")))?;
+    let spec: GraphSpec = from_str(json)
+        .map_err(|error| GraphError::Validation(format!("invalid graph json: {error}")))?;
     let mut builder = GraphBuilder::new();
     let mut nodes = BTreeMap::new();
 
@@ -68,14 +79,14 @@ pub fn build_graph_from_json(
         match node {
             NodeSpec::Producer(spec) => {
                 nodes.insert(
-                    spec.id(),
-                    BuiltNode::Producer(builder.add(spec.clone())),
+                    spec.id.clone(),
+                    BuiltNode::Producer(builder.add(ProducerNodeSpec::new(spec.config.clone()))),
                 );
             }
             NodeSpec::Scale(spec) => {
                 nodes.insert(
-                    spec.id(),
-                    BuiltNode::Scale(builder.add(spec.clone())),
+                    spec.id.clone(),
+                    BuiltNode::Scale(builder.add(ScaleNodeSpec::new(spec.config.clone()))),
                 );
             }
         }
@@ -88,7 +99,12 @@ pub fn build_graph_from_json(
             edge.from.port.as_str(),
             edge.to.port.as_str(),
         ) {
-            (Some(BuiltNode::Producer(source)), Some(BuiltNode::Scale(target)), "value", "value") => {
+            (
+                Some(BuiltNode::Producer(source)),
+                Some(BuiltNode::Scale(target)),
+                "value",
+                "value",
+            ) => {
                 builder.connect(source.output.value, target.input.value)?;
             }
             _ => {
@@ -119,8 +135,14 @@ pub fn graph_schema() -> JsonSchema {
 pub fn example_graph_spec() -> GraphSpec {
     GraphSpec {
         nodes: vec![
-            NodeSpec::Producer(ProducerNodeSpec::new(ProducerConfig { value: 6.0 }).with_id("producer_1")),
-            NodeSpec::Scale(ScaleNodeSpec::new(ScaleConfig { factor: 1.5 }).with_id("scale_1")),
+            NodeSpec::Producer(ExportedNode {
+                id: "producer_1".into(),
+                config: ProducerConfig { value: 6.0 },
+            }),
+            NodeSpec::Scale(ExportedNode {
+                id: "scale_1".into(),
+                config: ScaleConfig { factor: 1.5 },
+            }),
         ],
         edges: vec![EdgeSpec {
             from: PortRef {
@@ -136,7 +158,8 @@ pub fn example_graph_spec() -> GraphSpec {
 }
 
 pub fn graph_spec_to_json(spec: &GraphSpec) -> Result<String, GraphError> {
-    to_string(spec).map_err(|error| GraphError::Validation(format!("could not encode graph json: {error}")))
+    to_string(spec)
+        .map_err(|error| GraphError::Validation(format!("could not encode graph json: {error}")))
 }
 
 pub fn graph_spec_to_rust_struct(spec: &GraphSpec) -> String {
@@ -173,10 +196,7 @@ pub fn graph_spec_to_rust_builder(spec: &GraphSpec) -> Result<String, GraphError
     for edge in &spec.edges {
         let from = sanitize_identifier(&edge.from.node);
         let to = sanitize_identifier(&edge.to.node);
-        let line = match (
-            edge.from.port.as_str(),
-            edge.to.port.as_str(),
-        ) {
+        let line = match (edge.from.port.as_str(), edge.to.port.as_str()) {
             ("value", "value") => {
                 format!("builder.connect({from}.output.value, {to}.input.value)?;")
             }
@@ -220,7 +240,11 @@ fn sanitize_identifier(id: &str) -> String {
 
     if sanitized.is_empty() {
         "_node".into()
-    } else if sanitized.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+    } else if sanitized
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_digit())
+    {
         format!("_{sanitized}")
     } else {
         sanitized
@@ -233,11 +257,9 @@ mod tests {
 
     #[tokio::test]
     async fn programmatic_graph_runs() {
-        let (graph, mut result) = build_programmatic_graph(
-            ProducerConfig { value: 3.5 },
-            ScaleConfig { factor: 2.0 },
-        )
-        .expect("graph builds");
+        let (graph, mut result) =
+            build_programmatic_graph(ProducerConfig { value: 3.5 }, ScaleConfig { factor: 2.0 })
+                .expect("graph builds");
 
         let run = tokio::spawn(graph.run());
         let value = result.recv().await.expect("result value");
@@ -249,8 +271,14 @@ mod tests {
     async fn json_graph_runs() {
         let json = graph_spec_to_json(&GraphSpec {
             nodes: vec![
-                NodeSpec::Producer(ProducerNodeSpec::new(ProducerConfig { value: 4.0 }).with_id("producer_1")),
-                NodeSpec::Scale(ScaleNodeSpec::new(ScaleConfig { factor: 0.5 }).with_id("scale_1")),
+                NodeSpec::Producer(ExportedNode {
+                    id: "producer_1".into(),
+                    config: ProducerConfig { value: 4.0 },
+                }),
+                NodeSpec::Scale(ExportedNode {
+                    id: "scale_1".into(),
+                    config: ScaleConfig { factor: 0.5 },
+                }),
             ],
             edges: vec![EdgeSpec {
                 from: PortRef {
@@ -286,5 +314,15 @@ mod tests {
         assert!(builder.contains("builder.connect("));
         assert!(builder.contains("ProducerNode"));
         assert!(builder.contains("ScaleNode"));
+    }
+
+    #[test]
+    fn builder_assigns_readable_ids() {
+        let mut builder = GraphBuilder::new();
+        let producer = builder.add(ProducerNodeSpec::new(ProducerConfig { value: 1.0 }));
+        let scale = builder.add(ScaleNodeSpec::new(ScaleConfig { factor: 2.0 }));
+
+        assert_eq!(producer.id, "producer_1");
+        assert_eq!(scale.id, "scale_1");
     }
 }

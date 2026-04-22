@@ -143,10 +143,12 @@ pub trait NodeDefinition: Send + Sync + 'static {
 pub trait GraphNodeSpec {
     type Node: NodeDefinition;
 
+    fn kind(&self) -> &'static str;
     fn into_parts(self) -> (Self::Node, <Self::Node as NodeDefinition>::Config);
 }
 
 pub struct NodeHandle<Node: NodeDefinition> {
+    pub id: String,
     pub input: <Node::Input as NodeInputs>::Ports,
     pub output: <Node::Output as NodeOutputs>::Ports,
 }
@@ -266,6 +268,7 @@ impl Graph {
 pub struct GraphBuilder {
     nodes: Vec<NodeRegistration>,
     channel_capacity: usize,
+    next_id_by_kind: BTreeMap<&'static str, usize>,
 }
 
 impl GraphBuilder {
@@ -273,6 +276,7 @@ impl GraphBuilder {
         Self {
             nodes: Vec::new(),
             channel_capacity: 8,
+            next_id_by_kind: BTreeMap::new(),
         }
     }
 
@@ -285,12 +289,19 @@ impl GraphBuilder {
         &mut self,
         spec: Spec,
     ) -> NodeHandle<Spec::Node> {
+        let next = self
+            .next_id_by_kind
+            .entry(spec.kind())
+            .and_modify(|count| *count += 1)
+            .or_insert(1);
+        let assigned_id = format!("{}_{}", spec.kind(), *next);
         let (node, config) = spec.into_parts();
-        self.add_node(node, config)
+        self.add_node(assigned_id, node, config)
     }
 
     fn add_node<Node: NodeDefinition>(
         &mut self,
+        assigned_id: String,
         node: Node,
         config: Node::Config,
     ) -> NodeHandle<Node> {
@@ -311,6 +322,7 @@ impl GraphBuilder {
         });
 
         NodeHandle {
+            id: assigned_id,
             input: Node::Input::ports(&factory),
             output: Node::Output::ports(&factory),
         }

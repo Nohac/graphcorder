@@ -1,16 +1,19 @@
 use graphcorder::pipeline::{
-    ProducerConfig, ScaleConfig, build_graph_from_json, build_programmatic_graph, example_graph_spec,
-    graph_schema, graph_spec_to_rust_builder, graph_spec_to_rust_struct,
+    ProducerConfig, ScaleConfig, build_graph_from_json, build_programmatic_graph,
+    example_graph_spec, graph_schema, graph_spec_to_rust_builder, graph_spec_to_rust_struct,
 };
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (graph, mut result) =
+    let (graph, mut result, mut result2) =
         build_programmatic_graph(ProducerConfig { value: 6.0 }, ScaleConfig { factor: 1.5 })?;
 
     let run = tokio::spawn(graph.run());
     if let Some(value) = result.recv().await {
         println!("programmatic result: {value}");
+    }
+    if let Some(value) = result2.recv().await {
+        println!("programmatic result2: {value}");
     }
     run.await??;
 

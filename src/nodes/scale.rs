@@ -10,7 +10,6 @@ pub struct ScaleConfig {
 
 #[derive(Clone, Debug, Facet)]
 pub struct ScaleNodeSpec {
-    pub id: String,
     pub config: ScaleConfig,
 }
 
@@ -46,24 +45,16 @@ impl NodeDefinition for ScaleNode {
 
 impl ScaleNodeSpec {
     pub fn new(config: ScaleConfig) -> Self {
-        Self {
-            id: String::new(),
-            config,
-        }
-    }
-
-    pub fn with_id(mut self, id: impl Into<String>) -> Self {
-        self.id = id.into();
-        self
-    }
-
-    pub fn id(&self) -> String {
-        self.id.clone()
+        Self { config }
     }
 }
 
 impl GraphNodeSpec for ScaleNodeSpec {
     type Node = ScaleNode;
+
+    fn kind(&self) -> &'static str {
+        ScaleNode::KIND
+    }
 
     fn into_parts(self) -> (Self::Node, <Self::Node as NodeDefinition>::Config) {
         (ScaleNode, self.config)
