@@ -49,6 +49,13 @@ impl GraphNodeSpec for ProducerNodeSpec {
         ProducerNode::KIND
     }
 
+    fn export_node(&self, id: String) -> crate::pipeline::NodeSpec {
+        crate::pipeline::NodeSpec::Producer(crate::pipeline::ProducerGraphNode {
+            id,
+            config: self.config.clone(),
+        })
+    }
+
     fn into_parts(self) -> (Self::Node, <Self::Node as NodeDefinition>::Config) {
         (ProducerNode, self.config)
     }

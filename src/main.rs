@@ -1,12 +1,34 @@
-use graphcorder::pipeline::{
-    ProducerConfig, ScaleConfig, build_graph_from_json, build_programmatic_graph,
-    example_graph_spec, graph_schema, graph_spec_to_rust_builder, graph_spec_to_rust_struct,
+use facet_pretty::FacetPretty;
+use graphcorder::{
+    framework::GraphBuilder,
+    pipeline::{
+        GraphBuilderGraphSpecExt, GraphSpec, ProducerConfig, ProducerNodeSpec, ScaleConfig,
+        ScaleNodeSpec, build_graph_from_spec,
+    },
 };
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (graph, mut result, mut result2) =
-        build_programmatic_graph(ProducerConfig { value: 6.0 }, ScaleConfig { factor: 1.5 })?;
+    let producer_conf = ProducerConfig { value: 6.0 };
+    let scale_conf = ScaleConfig { factor: 1.5 };
+
+    let mut builder = GraphBuilder::new();
+    let producer = builder.add(ProducerNodeSpec::new(producer_conf));
+    let scale_1x = builder.add(ScaleNodeSpec::new(scale_conf.clone()));
+    let scale_2x = builder.add(ScaleNodeSpec::new(ScaleConfig {
+        factor: scale_conf.factor * 2.0,
+    }));
+
+    builder.connect(producer.output.value, scale_1x.input.value)?;
+    builder.connect(producer.output.value, scale_2x.input.value)?;
+    let mut result = builder.capture_output(scale_1x.output.result)?;
+    let mut result2 = builder.capture_output(scale_2x.output.result)?;
+
+    let spec = builder.graph_spec().unwrap();
+
+    println!("{}", spec.pretty());
+
+    let graph = builder.build();
 
     let run = tokio::spawn(graph.run());
     if let Some(value) = result.recv().await {
@@ -17,18 +39,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     run.await??;
 
-    let json = facet_json::to_string_pretty(&example_graph_spec())?;
-    println!("{json}");
-    println!("{}", graph_spec_to_rust_struct(&example_graph_spec()));
-    println!("{}", graph_spec_to_rust_builder(&example_graph_spec())?);
+    let json_spec = facet_json::to_string_pretty(&spec).unwrap();
+    println!("{}", json_spec);
+    let graph: GraphSpec = facet_json::from_str(&json_spec).unwrap();
 
-    let (graph, mut result, _) = build_graph_from_json(&json)?;
+    let (graph, mut result, _) = build_graph_from_spec(graph)?;
     let run = tokio::spawn(graph.run());
     if let Some(value) = result.recv().await {
         println!("json result: {value}");
     }
     run.await??;
 
-    println!("{}", facet_json::to_string_pretty(&graph_schema())?);
     Ok(())
 }

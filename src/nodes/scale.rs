@@ -56,6 +56,13 @@ impl GraphNodeSpec for ScaleNodeSpec {
         ScaleNode::KIND
     }
 
+    fn export_node(&self, id: String) -> crate::pipeline::NodeSpec {
+        crate::pipeline::NodeSpec::Scale(crate::pipeline::ScaleGraphNode {
+            id,
+            config: self.config.clone(),
+        })
+    }
+
     fn into_parts(self) -> (Self::Node, <Self::Node as NodeDefinition>::Config) {
         (ScaleNode, self.config)
     }

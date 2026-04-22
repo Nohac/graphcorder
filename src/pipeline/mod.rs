@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+use enum_dispatch::enum_dispatch;
 use facet::Facet;
-use facet_json::{from_str, to_string};
+use facet_json::to_string;
 use facet_json_schema::{JsonSchema, schema_for};
 use facet_pretty::FacetPretty;
 use tokio::sync::mpsc;
@@ -28,6 +29,7 @@ pub fn build_programmatic_graph(
     builder.connect(producer.output.value, scale_2x.input.value)?;
     let result = builder.capture_output(scale_1x.output.result)?;
     let result2 = builder.capture_output(scale_2x.output.result)?;
+    println!("{}", builder.graph_spec().unwrap().pretty());
     Ok((builder.build(), result, result2))
 }
 
@@ -37,11 +39,30 @@ pub struct GraphSpec {
     pub edges: Vec<EdgeSpec>,
 }
 
+#[enum_dispatch]
+pub(crate) trait RegisteredNodeSpec {
+    fn id(&self) -> &str;
+    fn kind(&self) -> &'static str;
+    fn add_to_builder(&self, builder: &mut GraphBuilder) -> BuiltNode;
+    fn write_rust_builder_stmt(&self, code: &mut String) -> Result<(), GraphError>;
+}
+
 #[repr(C)]
 #[derive(Clone, Debug, Facet)]
+#[enum_dispatch(RegisteredNodeSpec)]
 pub enum NodeSpec {
-    Producer(ExportedNode<ProducerConfig>),
-    Scale(ExportedNode<ScaleConfig>),
+    Producer(ProducerGraphNode),
+    Scale(ScaleGraphNode),
+}
+
+impl NodeSpec {
+    pub fn id(&self) -> &str {
+        RegisteredNodeSpec::id(self)
+    }
+
+    pub fn kind(&self) -> &'static str {
+        RegisteredNodeSpec::kind(self)
+    }
 }
 
 #[derive(Clone, Debug, Facet)]
@@ -57,9 +78,15 @@ pub struct PortRef {
 }
 
 #[derive(Clone, Debug, Facet)]
-pub struct ExportedNode<Config> {
+pub struct ProducerGraphNode {
     pub id: String,
-    pub config: Config,
+    pub config: ProducerConfig,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct ScaleGraphNode {
+    pub id: String,
+    pub config: ScaleConfig,
 }
 
 pub trait GraphBuilderGraphSpecExt {
@@ -68,37 +95,11 @@ pub trait GraphBuilderGraphSpecExt {
 
 impl GraphBuilderGraphSpecExt for GraphBuilder {
     fn graph_spec(&self) -> Result<GraphSpec, GraphError> {
-        let snapshot = self.spec_snapshot();
-        let mut nodes = Vec::with_capacity(snapshot.nodes.len());
-
-        for node in snapshot.nodes {
-            match node.kind {
-                "producer" => nodes.push(NodeSpec::Producer(ExportedNode {
-                    id: node.id,
-                    config: from_str(&node.config_json).map_err(|error| {
-                        GraphError::Validation(format!(
-                            "invalid stored producer config json: {error}"
-                        ))
-                    })?,
-                })),
-                "scale" => nodes.push(NodeSpec::Scale(ExportedNode {
-                    id: node.id,
-                    config: from_str(&node.config_json).map_err(|error| {
-                        GraphError::Validation(format!(
-                            "invalid stored scale config json: {error}"
-                        ))
-                    })?,
-                })),
-                other => {
-                    return Err(GraphError::Validation(format!(
-                        "unsupported node kind `{other}` in builder snapshot"
-                    )));
-                }
-            }
-        }
-
-        let edges = snapshot
-            .edges
+        let nodes = self.export_nodes().to_vec();
+        let edges = self
+            .edges()
+            .iter()
+            .cloned()
             .into_iter()
             .map(|edge| EdgeSpec {
                 from: PortRef {
@@ -116,69 +117,118 @@ impl GraphBuilderGraphSpecExt for GraphBuilder {
     }
 }
 
-enum BuiltNode {
+impl RegisteredNodeSpec for ProducerGraphNode {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn kind(&self) -> &'static str {
+        "producer"
+    }
+
+    fn add_to_builder(&self, builder: &mut GraphBuilder) -> BuiltNode {
+        BuiltNode::Producer(builder.add(ProducerNodeSpec::new(self.config.clone())))
+    }
+
+    fn write_rust_builder_stmt(&self, code: &mut String) -> Result<(), GraphError> {
+        writeln!(
+            code,
+            "let {} = builder.add(ProducerNodeSpec::new(ProducerConfig {{ value: {:?} }}));",
+            sanitize_identifier(&self.id),
+            self.config.value
+        )
+        .map_err(|error| GraphError::Validation(format!("could not write builder code: {error}")))
+    }
+}
+
+impl RegisteredNodeSpec for ScaleGraphNode {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn kind(&self) -> &'static str {
+        "scale"
+    }
+
+    fn add_to_builder(&self, builder: &mut GraphBuilder) -> BuiltNode {
+        BuiltNode::Scale(builder.add(ScaleNodeSpec::new(self.config.clone())))
+    }
+
+    fn write_rust_builder_stmt(&self, code: &mut String) -> Result<(), GraphError> {
+        writeln!(
+            code,
+            "let {} = builder.add(ScaleNodeSpec::new(ScaleConfig {{ factor: {:?} }}));",
+            sanitize_identifier(&self.id),
+            self.config.factor
+        )
+        .map_err(|error| GraphError::Validation(format!("could not write builder code: {error}")))
+    }
+}
+
+pub(crate) enum BuiltNode {
     Producer(crate::framework::NodeHandle<crate::nodes::producer::ProducerNode>),
     Scale(crate::framework::NodeHandle<crate::nodes::scale::ScaleNode>),
 }
 
-pub fn build_graph_from_json(
-    json: &str,
+impl BuiltNode {
+    fn connect_to(
+        &self,
+        builder: &mut GraphBuilder,
+        from_port: &str,
+        target: &BuiltNode,
+        to_port: &str,
+    ) -> Result<(), GraphError> {
+        match (self, from_port, target, to_port) {
+            (BuiltNode::Producer(source), "value", BuiltNode::Scale(target), "value") => {
+                builder.connect(source.output.value, target.input.value)
+            }
+            _ => Err(GraphError::Validation(format!(
+                "unsupported edge {} -> {}",
+                from_port, to_port
+            ))),
+        }
+    }
+
+    fn capture_f32_output(
+        &self,
+        builder: &mut GraphBuilder,
+        port: &str,
+    ) -> Result<mpsc::Receiver<f32>, GraphError> {
+        match (self, port) {
+            (BuiltNode::Scale(node), "result") => builder.capture_output(node.output.result),
+            _ => Err(GraphError::Validation(format!(
+                "unsupported output capture for port `{port}`"
+            ))),
+        }
+    }
+}
+
+pub fn build_graph_from_spec(
+    spec: GraphSpec,
 ) -> Result<(Graph, mpsc::Receiver<f32>, GraphSpec), GraphError> {
-    let spec: GraphSpec = from_str(json)
-        .map_err(|error| GraphError::Validation(format!("invalid graph json: {error}")))?;
     let mut builder = GraphBuilder::new();
     let mut nodes = BTreeMap::new();
 
     for node in &spec.nodes {
-        match node {
-            NodeSpec::Producer(spec) => {
-                nodes.insert(
-                    spec.id.clone(),
-                    BuiltNode::Producer(builder.add(ProducerNodeSpec::new(spec.config.clone()))),
-                );
-            }
-            NodeSpec::Scale(spec) => {
-                nodes.insert(
-                    spec.id.clone(),
-                    BuiltNode::Scale(builder.add(ScaleNodeSpec::new(spec.config.clone()))),
-                );
-            }
-        }
+        nodes.insert(node.id().to_owned(), node.add_to_builder(&mut builder));
     }
 
     for edge in &spec.edges {
-        match (
-            nodes.get(&edge.from.node),
-            nodes.get(&edge.to.node),
-            edge.from.port.as_str(),
-            edge.to.port.as_str(),
-        ) {
-            (
-                Some(BuiltNode::Producer(source)),
-                Some(BuiltNode::Scale(target)),
-                "value",
-                "value",
-            ) => {
-                builder.connect(source.output.value, target.input.value)?;
-            }
-            _ => {
-                return Err(GraphError::Validation(format!(
-                    "unsupported edge {}.{} -> {}.{}",
-                    edge.from.node, edge.from.port, edge.to.node, edge.to.port
-                )));
-            }
-        }
+        let source = nodes.get(&edge.from.node).ok_or_else(|| {
+            GraphError::Validation(format!("missing source node `{}`", edge.from.node))
+        })?;
+        let target = nodes.get(&edge.to.node).ok_or_else(|| {
+            GraphError::Validation(format!("missing target node `{}`", edge.to.node))
+        })?;
+        source.connect_to(&mut builder, &edge.from.port, target, &edge.to.port)?;
     }
 
     let scale = nodes
         .values()
-        .find_map(|node| match node {
-            BuiltNode::Scale(handle) => Some(handle),
-            BuiltNode::Producer(_) => None,
-        })
+        .find(|node| matches!(node, BuiltNode::Scale(_)))
         .ok_or_else(|| GraphError::Validation("graph did not contain a scale node".into()))?;
 
-    let result = builder.capture_output(scale.output.result)?;
+    let result = scale.capture_f32_output(&mut builder, "result")?;
     Ok((builder.build(), result, spec))
 }
 
@@ -189,11 +239,11 @@ pub fn graph_schema() -> JsonSchema {
 pub fn example_graph_spec() -> GraphSpec {
     GraphSpec {
         nodes: vec![
-            NodeSpec::Producer(ExportedNode {
+            NodeSpec::Producer(ProducerGraphNode {
                 id: "producer_1".into(),
                 config: ProducerConfig { value: 6.0 },
             }),
-            NodeSpec::Scale(ExportedNode {
+            NodeSpec::Scale(ScaleGraphNode {
                 id: "scale_1".into(),
                 config: ScaleConfig { factor: 1.5 },
             }),
@@ -225,26 +275,7 @@ pub fn graph_spec_to_rust_builder(spec: &GraphSpec) -> Result<String, GraphError
     writeln!(&mut code, "let mut builder = GraphBuilder::new();").expect("write to string");
 
     for node in &spec.nodes {
-        match node {
-            NodeSpec::Producer(spec) => {
-                writeln!(
-                    &mut code,
-                    "let {} = builder.add(ProducerNodeSpec::new(ProducerConfig {{ value: {:?} }}));",
-                    sanitize_identifier(&spec.id),
-                    spec.config.value
-                )
-                .expect("write to string");
-            }
-            NodeSpec::Scale(spec) => {
-                writeln!(
-                    &mut code,
-                    "let {} = builder.add(ScaleNodeSpec::new(ScaleConfig {{ factor: {:?} }}));",
-                    sanitize_identifier(&spec.id),
-                    spec.config.factor
-                )
-                .expect("write to string");
-            }
-        }
+        node.write_rust_builder_stmt(&mut code)?;
     }
 
     for edge in &spec.edges {
@@ -264,10 +295,12 @@ pub fn graph_spec_to_rust_builder(spec: &GraphSpec) -> Result<String, GraphError
         writeln!(&mut code, "{line}").expect("write to string");
     }
 
-    if let Some(scale_id) = spec.nodes.iter().find_map(|node| match node {
-        NodeSpec::Scale(spec) => Some(sanitize_identifier(&spec.id)),
-        NodeSpec::Producer(_) => None,
-    }) {
+    if let Some(scale_id) = spec
+        .nodes
+        .iter()
+        .find(|node| node.kind() == "scale")
+        .map(|node| sanitize_identifier(node.id()))
+    {
         writeln!(
             &mut code,
             "let result = builder.capture_output({scale_id}.output.result)?;"
@@ -323,40 +356,6 @@ mod tests {
         run.await.expect("task join").expect("graph run");
     }
 
-    #[tokio::test]
-    async fn json_graph_runs() {
-        let json = graph_spec_to_json(&GraphSpec {
-            nodes: vec![
-                NodeSpec::Producer(ExportedNode {
-                    id: "producer_1".into(),
-                    config: ProducerConfig { value: 4.0 },
-                }),
-                NodeSpec::Scale(ExportedNode {
-                    id: "scale_1".into(),
-                    config: ScaleConfig { factor: 0.5 },
-                }),
-            ],
-            edges: vec![EdgeSpec {
-                from: PortRef {
-                    node: "producer_1".into(),
-                    port: "value".into(),
-                },
-                to: PortRef {
-                    node: "scale_1".into(),
-                    port: "value".into(),
-                },
-            }],
-        })
-        .expect("graph json");
-
-        let (graph, mut result, _) = build_graph_from_json(&json).expect("graph loads");
-
-        let run = tokio::spawn(graph.run());
-        let value = result.recv().await.expect("result value");
-        assert_eq!(value, 2.0);
-        run.await.expect("task join").expect("graph run");
-    }
-
     #[test]
     fn rust_exports_render() {
         let spec = example_graph_spec();
@@ -407,10 +406,18 @@ mod tests {
         let scale_1 = builder.add(ScaleNodeSpec::new(ScaleConfig { factor: 2.0 }));
         let scale_2 = builder.add(ScaleNodeSpec::new(ScaleConfig { factor: 3.0 }));
 
-        builder.connect(producer.output.value, scale_1.input.value).expect("connect scale_1");
-        builder.connect(producer.output.value, scale_2.input.value).expect("connect scale_2");
-        let mut result_1 = builder.capture_output(scale_1.output.result).expect("capture scale_1");
-        let mut result_2 = builder.capture_output(scale_2.output.result).expect("capture scale_2");
+        builder
+            .connect(producer.output.value, scale_1.input.value)
+            .expect("connect scale_1");
+        builder
+            .connect(producer.output.value, scale_2.input.value)
+            .expect("connect scale_2");
+        let mut result_1 = builder
+            .capture_output(scale_1.output.result)
+            .expect("capture scale_1");
+        let mut result_2 = builder
+            .capture_output(scale_2.output.result)
+            .expect("capture scale_2");
 
         let graph = builder.build();
         let run = tokio::spawn(graph.run());

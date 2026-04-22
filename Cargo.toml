@@ -7,6 +7,7 @@ edition = "2024"
 members = ["graphcorder_derive"]
 
 [dependencies]
+enum_dispatch = "0.3"
 facet = "0.46.0"
 facet-json = "0.46.0"
 facet-json-schema = "0.46.0"

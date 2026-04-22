@@ -104,24 +104,11 @@ pub struct PortSchema {
 }
 
 #[derive(Clone, Debug)]
-pub struct GraphNodeSnapshot {
-    pub id: String,
-    pub kind: &'static str,
-    pub config_json: String,
-}
-
-#[derive(Clone, Debug)]
 pub struct GraphEdgeSnapshot {
     pub from_node: String,
     pub from_port: &'static str,
     pub to_node: String,
     pub to_port: &'static str,
-}
-
-#[derive(Clone, Debug)]
-pub struct GraphSpecSnapshot {
-    pub nodes: Vec<GraphNodeSnapshot>,
-    pub edges: Vec<GraphEdgeSnapshot>,
 }
 
 pub trait NodeInputs: Send + Sized + 'static {
@@ -165,6 +152,7 @@ pub trait GraphNodeSpec {
     type Node: NodeDefinition;
 
     fn kind(&self) -> &'static str;
+    fn export_node(&self, id: String) -> crate::pipeline::NodeSpec;
     fn into_parts(self) -> (Self::Node, <Self::Node as NodeDefinition>::Config);
 }
 
@@ -301,7 +289,7 @@ pub struct GraphBuilder {
     nodes: Vec<NodeRegistration>,
     channel_capacity: usize,
     next_id_by_kind: BTreeMap<&'static str, usize>,
-    node_specs: Vec<GraphNodeSnapshot>,
+    node_specs: Vec<crate::pipeline::NodeSpec>,
     edges: Vec<GraphEdgeSnapshot>,
 }
 
@@ -331,6 +319,7 @@ impl GraphBuilder {
             .and_modify(|count| *count += 1)
             .or_insert(1);
         let assigned_id = format!("{}_{}", spec.kind(), *next);
+        self.node_specs.push(spec.export_node(assigned_id.clone()));
         let (node, config) = spec.into_parts();
         self.add_node(assigned_id, node, config)
     }
@@ -343,9 +332,6 @@ impl GraphBuilder {
     ) -> NodeHandle<Node> {
         let node_id = NodeId(self.nodes.len());
         let factory = PortFactory { node_id };
-        let config_json =
-            facet_json::to_string(&config).expect("node config should serialize to facet json");
-
         self.nodes.push(NodeRegistration {
             name: Node::KIND,
             task: Box::new(move |mut inputs, mut outputs| {
@@ -357,11 +343,6 @@ impl GraphBuilder {
             }),
             inputs: BTreeMap::new(),
             outputs: BTreeMap::new(),
-        });
-        self.node_specs.push(GraphNodeSnapshot {
-            id: assigned_id.clone(),
-            kind: Node::KIND,
-            config_json,
         });
 
         NodeHandle {
@@ -396,12 +377,12 @@ impl GraphBuilder {
         let from_node = self
             .node_specs
             .get(source_node_id)
-            .map(|node| node.id.clone())
+            .map(|node| node.id().to_owned())
             .ok_or_else(|| GraphError::Validation("source node metadata did not exist".into()))?;
         let to_node = self
             .node_specs
             .get(target.node_id.0)
-            .map(|node| node.id.clone())
+            .map(|node| node.id().to_owned())
             .ok_or_else(|| GraphError::Validation("target node metadata did not exist".into()))?;
         self.edges.push(GraphEdgeSnapshot {
             from_node,
@@ -424,11 +405,12 @@ impl GraphBuilder {
         Graph { nodes: self.nodes }
     }
 
-    pub fn spec_snapshot(&self) -> GraphSpecSnapshot {
-        GraphSpecSnapshot {
-            nodes: self.node_specs.clone(),
-            edges: self.edges.clone(),
-        }
+    pub fn export_nodes(&self) -> &[crate::pipeline::NodeSpec] {
+        &self.node_specs
+    }
+
+    pub fn edges(&self) -> &[GraphEdgeSnapshot] {
+        &self.edges
     }
 
     fn attach_output<T: Send + 'static>(
