@@ -393,14 +393,6 @@ impl GraphBuilder {
         Ok(())
     }
 
-    pub fn capture_output<T: Send + 'static>(
-        &mut self,
-        source: OutputPort<T>,
-    ) -> Result<mpsc::Receiver<T>, GraphError> {
-        let (_sender, receiver) = self.attach_output(source)?;
-        Ok(receiver)
-    }
-
     pub fn build(self) -> Graph {
         Graph { nodes: self.nodes }
     }
@@ -461,6 +453,20 @@ impl NodeInputs for () {
     }
 
     async fn receive(_runtime: &mut InputRuntime) -> Result<Self, GraphError> {
+        Ok(())
+    }
+}
+
+impl NodeOutputs for () {
+    type Ports = ();
+
+    fn ports(_factory: &PortFactory) -> Self::Ports {}
+
+    fn schema() -> Vec<PortSchema> {
+        Vec::new()
+    }
+
+    async fn send(self, _runtime: &mut OutputRuntime) -> Result<(), GraphError> {
         Ok(())
     }
 }
