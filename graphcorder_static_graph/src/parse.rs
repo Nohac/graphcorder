@@ -1,7 +1,9 @@
+use syn::braced;
 use syn::parse::{Parse, ParseStream};
-use syn::{Ident, Result, Token, Type};
+use syn::punctuated::Punctuated;
+use syn::{FieldValue, Ident, Result, Token, Type};
 
-use crate::types::{ConnectDecl, Endpoint, GraphItem, NodeDecl, StaticGraphInput};
+use crate::types::{ConnectDecl, Endpoint, EndpointSet, GraphItem, NodeDecl, StaticGraphInput};
 
 mod kw {
     syn::custom_keyword!(registry);
@@ -35,31 +37,55 @@ impl Parse for NodeDecl {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         input.parse::<kw::node>()?;
         let name = input.parse::<Ident>()?;
-        input.parse::<Token![:]>()?;
-        let spec_ty = input.parse()?;
         input.parse::<Token![=]>()?;
-        let expr = input.parse()?;
+        let node_ty = input.parse()?;
+        let content;
+        braced!(content in input);
+        let fields = Punctuated::<FieldValue, Token![,]>::parse_terminated(&content)?;
         input.parse::<Token![;]>()?;
-        Ok(Self { name, spec_ty, expr })
+        Ok(Self {
+            name,
+            node_ty,
+            fields,
+        })
     }
 }
 
 impl Parse for ConnectDecl {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         input.parse::<kw::connect>()?;
-        let source = input.parse::<Endpoint>()?;
+        let source = input.parse::<EndpointSet>()?;
         input.parse::<Token![->]>()?;
-        let target = input.parse::<Endpoint>()?;
+        let target = input.parse::<EndpointSet>()?;
         input.parse::<Token![;]>()?;
         Ok(Self { source, target })
+    }
+}
+
+impl Parse for EndpointSet {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        if input.peek(syn::token::Bracket) {
+            let content;
+            syn::bracketed!(content in input);
+            let endpoints = Punctuated::<Endpoint, Token![,]>::parse_terminated(&content)?
+                .into_iter()
+                .collect();
+            Ok(Self::Many(endpoints))
+        } else {
+            Ok(Self::One(input.parse()?))
+        }
     }
 }
 
 impl Parse for Endpoint {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         let node = input.parse::<Ident>()?;
-        input.parse::<Token![.]>()?;
-        let port = input.parse::<Ident>()?;
+        let port = if input.peek(Token![.]) {
+            input.parse::<Token![.]>()?;
+            Some(input.parse::<Ident>()?)
+        } else {
+            None
+        };
         Ok(Self { node, port })
     }
 }

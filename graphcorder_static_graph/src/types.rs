@@ -1,4 +1,4 @@
-use syn::{Expr, Ident, Type};
+use syn::{FieldValue, Ident, Token, Type, punctuated::Punctuated};
 
 pub struct StaticGraphInput {
     pub registry: Type,
@@ -12,16 +12,22 @@ pub enum GraphItem {
 
 pub struct NodeDecl {
     pub name: Ident,
-    pub spec_ty: Type,
-    pub expr: Expr,
+    pub node_ty: Type,
+    pub fields: Punctuated<FieldValue, Token![,]>,
 }
 
 pub struct ConnectDecl {
-    pub source: Endpoint,
-    pub target: Endpoint,
+    pub source: EndpointSet,
+    pub target: EndpointSet,
 }
 
+pub enum EndpointSet {
+    One(Endpoint),
+    Many(Vec<Endpoint>),
+}
+
+#[derive(Clone)]
 pub struct Endpoint {
     pub node: Ident,
-    pub port: Ident,
+    pub port: Option<Ident>,
 }

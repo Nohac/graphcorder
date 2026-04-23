@@ -5,7 +5,7 @@ use graphcorder::{
     NodeInputs, NodeOutputs,
     framework::{
         BuiltGraphNode, GraphError, GraphNode, GraphNodeSpec, GraphSpec, NodeDefinition,
-        RegisteredNodeSpec,
+        RegisteredNodeSpec, StaticNodeDsl,
     },
     static_graph,
 };
@@ -65,6 +65,16 @@ impl GraphNodeSpec for ProducerNodeSpec {
 
     fn into_parts(self) -> (Self::Node, ProducerConfig) {
         (ProducerNode, self.config)
+    }
+}
+
+impl StaticNodeDsl for ProducerNode {
+    type Config = ProducerConfig;
+    type Node = ProducerNode;
+    type Spec = ProducerNodeSpec;
+
+    fn from_config(config: Self::Config) -> Self::Spec {
+        ProducerNodeSpec::new(config)
     }
 }
 
@@ -131,6 +141,16 @@ impl GraphNodeSpec for ScaleNodeSpec {
     }
 }
 
+impl StaticNodeDsl for ScaleNode {
+    type Config = ScaleConfig;
+    type Node = ScaleNode;
+    type Spec = ScaleNodeSpec;
+
+    fn from_config(config: Self::Config) -> Self::Spec {
+        ScaleNodeSpec::new(config)
+    }
+}
+
 #[derive(Clone, Debug, Facet)]
 struct PrintConfig {
     label: String,
@@ -185,6 +205,16 @@ impl GraphNodeSpec for PrintNodeSpec {
 
     fn into_parts(self) -> (Self::Node, PrintConfig) {
         (PrintNode, self.config)
+    }
+}
+
+impl StaticNodeDsl for PrintNode {
+    type Config = PrintConfig;
+    type Node = PrintNode;
+    type Spec = PrintNodeSpec;
+
+    fn from_config(config: Self::Config) -> Self::Spec {
+        PrintNodeSpec::new(config)
     }
 }
 
@@ -264,22 +294,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let builder = static_graph! {
         registry: Node;
 
-        node producer: ProducerNodeSpec = ProducerNodeSpec::new(ProducerConfig {
+        node producer = ProducerNode {
             value: [6.0, 12.0, 18.0, 24.0].into(),
-        });
-        node scale_1x: ScaleNodeSpec = ScaleNodeSpec::new(ScaleConfig { factor: 1.5 });
-        node scale_2x: ScaleNodeSpec = ScaleNodeSpec::new(ScaleConfig { factor: 3.0 });
-        node print_1x: PrintNodeSpec = PrintNodeSpec::new(PrintConfig {
+        };
+        node scale_1x = ScaleNode { factor: 1.5 };
+        node scale_2x = ScaleNode { factor: 3.0 };
+        node print_1x = PrintNode {
             label: "programmatic result".into(),
-        });
-        node print_2x: PrintNodeSpec = PrintNodeSpec::new(PrintConfig {
+        };
+        node print_2x = PrintNode {
             label: "programmatic result2".into(),
-        });
+        };
 
-        connect producer.value -> scale_1x.value;
-        connect producer.value -> scale_2x.value;
-        connect scale_1x.result -> print_1x.value;
-        connect scale_2x.result -> print_2x.value;
+        connect producer -> [scale_1x, scale_2x];
+        connect scale_1x -> print_1x;
+        connect scale_2x -> print_2x;
     }?;
 
     let spec = builder.graph_spec();

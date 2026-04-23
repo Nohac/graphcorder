@@ -4,6 +4,6 @@ pub use crate::graph::{
     GraphNodeSpec, GraphSpec, Graphcorder, InputPort, InputPortValue, InputRuntime,
     NodeDefinition, NodeHandle, NodeInputs, NodeOutputs, OutputPort, OutputPortValue,
     OutputRuntime, PortCardinality, PortFactory, PortRef, PortSchema, PortValue,
-    RegisteredNodeSpec, StaticInputPorts, StaticOutputPorts, StaticPortInfo, has_missing_required_ports,
-    has_port, is_single_port, init,
+    RegisteredNodeSpec, StaticInputPorts, StaticNodeDsl, StaticOutputPorts, StaticPortInfo,
+    has_missing_required_ports, has_port, is_single_port, only_port_name, init,
 };

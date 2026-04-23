@@ -294,6 +294,14 @@ pub trait GraphNodeSpec {
     fn into_parts(self) -> (Self::Node, <Self::Node as NodeDefinition>::Config);
 }
 
+pub trait StaticNodeDsl {
+    type Config;
+    type Node: NodeDefinition;
+    type Spec: GraphNodeSpec<Node = Self::Node>;
+
+    fn from_config(config: Self::Config) -> Self::Spec;
+}
+
 pub const fn has_port(ports: &[StaticPortInfo], name: &str) -> bool {
     let mut index = 0;
     while index < ports.len() {
@@ -340,6 +348,14 @@ pub const fn has_missing_required_ports(
         port_index += 1;
     }
     false
+}
+
+pub const fn only_port_name(ports: &[StaticPortInfo]) -> Option<&'static str> {
+    if ports.len() == 1 {
+        Some(ports[0].name)
+    } else {
+        None
+    }
 }
 
 pub const fn const_str_eq(left: &str, right: &str) -> bool {
@@ -437,18 +453,23 @@ pub struct BuiltGraphNode<R: RegisteredNodeSpec> {
 }
 
 impl<R: RegisteredNodeSpec> BuiltGraphNode<R> {
+    pub fn new<I, O>(input: I, output: O) -> Self
+    where
+        I: ErasedInputPorts + Send + 'static,
+        O: ErasedOutputPorts + Send + 'static,
+    {
+        Self {
+            inner: Box::new(BuiltNodeAdapter { input, output }),
+        }
+    }
+
     pub fn from_handle<Node>(handle: NodeHandle<Node>) -> Self
     where
         Node: NodeDefinition,
         <Node::Input as NodeInputs>::Ports: ErasedInputPorts + Send + 'static,
         <Node::Output as NodeOutputs>::Ports: ErasedOutputPorts + Send + 'static,
     {
-        Self {
-            inner: Box::new(BuiltNodeAdapter {
-                input: handle.input,
-                output: handle.output,
-            }),
-        }
+        Self::new(handle.input, handle.output)
     }
 
     fn connect_to(
@@ -814,6 +835,16 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
             to_port: target.name,
         });
         Ok(())
+    }
+
+    pub fn connect_named(
+        &mut self,
+        source: &BuiltGraphNode<R>,
+        source_port: &str,
+        target: &BuiltGraphNode<R>,
+        target_port: &str,
+    ) -> Result<(), GraphError> {
+        source.connect_to(self, source_port, target, target_port)
     }
 
     pub fn build(self) -> Graph {
