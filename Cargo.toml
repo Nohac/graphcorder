@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = ["graphcorder_derive"]
+members = ["graphcorder_derive", "graphcorder_static_graph"]
 
 [dependencies]
 enum_dispatch = "0.3"
@@ -13,4 +13,5 @@ facet-json = "0.46.0"
 facet-json-schema = "0.46.0"
 facet-pretty = "0.46.0"
 graphcorder_derive = { path = "graphcorder_derive" }
+graphcorder_static_graph = { path = "graphcorder_static_graph" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

@@ -7,6 +7,7 @@ use graphcorder::{
         BuiltGraphNode, GraphError, GraphNode, GraphNodeSpec, GraphSpec, NodeDefinition,
         RegisteredNodeSpec,
     },
+    static_graph,
 };
 
 #[derive(Clone, Debug, Facet)]
@@ -260,24 +261,26 @@ impl RegisteredNodeSpec for Node {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let instance = graphcorder::init::<Node>();
-    let mut builder = instance.builder();
+    let builder = static_graph! {
+        registry: Node;
 
-    let producer = builder.add(ProducerNodeSpec::new(ProducerConfig {
-        value: [6.0, 12.0, 18.0, 24.0].into(),
-    }));
-    let scale_1x = builder.add(ScaleNodeSpec::new(ScaleConfig { factor: 1.5 }));
-    let scale_2x = builder.add(ScaleNodeSpec::new(ScaleConfig { factor: 3.0 }));
-    let print_1x = builder.add(PrintNodeSpec::new(PrintConfig {
-        label: "programmatic result".into(),
-    }));
-    let print_2x = builder.add(PrintNodeSpec::new(PrintConfig {
-        label: "programmatic result2".into(),
-    }));
+        node producer = ProducerNodeSpec::new(ProducerConfig {
+            value: [6.0, 12.0, 18.0, 24.0].into(),
+        });
+        node scale_1x = ScaleNodeSpec::new(ScaleConfig { factor: 1.5 });
+        node scale_2x = ScaleNodeSpec::new(ScaleConfig { factor: 3.0 });
+        node print_1x = PrintNodeSpec::new(PrintConfig {
+            label: "programmatic result".into(),
+        });
+        node print_2x = PrintNodeSpec::new(PrintConfig {
+            label: "programmatic result2".into(),
+        });
 
-    builder.connect(producer.output.value, scale_1x.input.value)?;
-    builder.connect(producer.output.value, scale_2x.input.value)?;
-    builder.connect(scale_1x.output.result, print_1x.input.value)?;
-    builder.connect(scale_2x.output.result, print_2x.input.value)?;
+        connect producer.value -> scale_1x.value;
+        connect producer.value -> scale_2x.value;
+        connect scale_1x.result -> print_1x.value;
+        connect scale_2x.result -> print_2x.value;
+    }?;
 
     let spec = builder.graph_spec();
     println!("{}", spec.pretty());
