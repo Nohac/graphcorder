@@ -397,12 +397,21 @@ fn derive_ports(input: TokenStream, kind: PortKind) -> TokenStream {
             }
         }
         PortKind::Output => {
-            let send_fields = fields.iter().map(|field| {
+            let init_fields = fields.iter().map(|field| {
                 let name = field.ident.as_ref().expect("named field");
                 let lit = name.to_string();
                 let ty = &field.ty;
                 quote! {
-                    <#ty as ::graphcorder::framework::OutputPortValue>::send(self.#name, runtime, #lit).await?;
+                    #name: <#ty as ::graphcorder::framework::OutputPortValue>::initialize_field(runtime, #lit),
+                }
+            });
+
+            let finalize_fields = fields.iter().map(|field| {
+                let name = field.ident.as_ref().expect("named field");
+                let lit = name.to_string();
+                let ty = &field.ty;
+                quote! {
+                    <#ty as ::graphcorder::framework::OutputPortValue>::finalize_field(self.#name, runtime, #lit).await?;
                 }
             });
 
@@ -431,11 +440,19 @@ fn derive_ports(input: TokenStream, kind: PortKind) -> TokenStream {
                         vec![ #( #schema_items, )* ]
                     }
 
-                    async fn send(
+                    fn initialize(
+                        runtime: &mut ::graphcorder::framework::OutputRuntime,
+                    ) -> Self {
+                        Self {
+                            #( #init_fields )*
+                        }
+                    }
+
+                    async fn finalize(
                         self,
                         runtime: &mut ::graphcorder::framework::OutputRuntime,
                     ) -> Result<(), ::graphcorder::framework::GraphError> {
-                        #( #send_fields )*
+                        #( #finalize_fields )*
                         Ok(())
                     }
                 }

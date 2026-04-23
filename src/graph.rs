@@ -194,7 +194,8 @@ pub trait NodeOutputs: Send + Sized + 'static {
 
     fn ports(factory: &PortFactory) -> Self::Ports;
     fn schema() -> Vec<PortSchema>;
-    fn send(
+    fn initialize(runtime: &mut OutputRuntime) -> Self;
+    fn finalize(
         self,
         runtime: &mut OutputRuntime,
     ) -> impl Future<Output = Result<(), GraphError>> + Send;
@@ -217,6 +218,56 @@ impl_port_value!(f32, f64, usize, u32, u64, i32, i64, bool, String);
 impl<T: PortValue> PortValue for Vec<T> {}
 
 impl<T: PortValue, const N: usize> PortValue for [T; N] {}
+
+/// A streaming port value: producers push values with [`send`](Stream::send) during
+/// `run()`; consumers receive them one at a time via [`next`](Stream::next).
+pub struct Stream<T: Clone + Send + 'static> {
+    inner: StreamInner<T>,
+}
+
+enum StreamInner<T: Clone + Send + 'static> {
+    Output(Vec<mpsc::Sender<T>>),
+    Input(mpsc::Receiver<T>),
+}
+
+impl<T: Clone + Send + 'static> Stream<T> {
+    pub(crate) fn from_senders(senders: Vec<mpsc::Sender<T>>) -> Self {
+        Self {
+            inner: StreamInner::Output(senders),
+        }
+    }
+
+    pub(crate) fn from_receiver(receiver: mpsc::Receiver<T>) -> Self {
+        Self {
+            inner: StreamInner::Input(receiver),
+        }
+    }
+
+    /// Push a value to all downstream nodes. Call this from the producing node's `run()`.
+    pub async fn send(&mut self, value: T) -> Result<(), GraphError> {
+        let StreamInner::Output(senders) = &mut self.inner else {
+            panic!("Stream::send() called on consumer-side stream");
+        };
+        for sender in senders.iter_mut() {
+            sender
+                .send(value.clone())
+                .await
+                .map_err(|_| GraphError::Validation("stream receiver was closed".into()))?;
+        }
+        Ok(())
+    }
+
+    /// Receive the next value from upstream. Returns `None` when the producer has finished.
+    pub async fn next(&mut self) -> Option<T> {
+        let StreamInner::Input(receiver) = &mut self.inner else {
+            panic!("Stream::next() called on producer-side stream");
+        };
+        receiver.recv().await
+    }
+}
+
+// Safety: Vec<mpsc::Sender<T>>: Send when T: Send; mpsc::Receiver<T>: Send when T: Send.
+unsafe impl<T: Clone + Send + 'static> Send for Stream<T> {}
 
 pub trait InputPortValue: Send + Sized + 'static {
     type EdgeValue: Send + 'static;
@@ -244,19 +295,8 @@ impl<T: PortValue> InputPortValue for T {
     }
 }
 
-pub trait OutputPortValue: Send + Sized + 'static {
-    type EdgeValue: Clone + Send + 'static;
-
-    fn schema(name: &'static str) -> PortSchema;
-    fn send(
-        self,
-        runtime: &mut OutputRuntime,
-        port: &'static str,
-    ) -> impl Future<Output = Result<(), GraphError>> + Send;
-}
-
-impl<T: PortValue> OutputPortValue for T {
-    type EdgeValue = T;
+impl<T: PortValue> InputPortValue for Stream<T> {
+    type EdgeValue = Stream<T>;
 
     fn schema(name: &'static str) -> PortSchema {
         PortSchema {
@@ -266,8 +306,86 @@ impl<T: PortValue> OutputPortValue for T {
         }
     }
 
-    async fn send(self, runtime: &mut OutputRuntime, port: &'static str) -> Result<(), GraphError> {
+    async fn receive(runtime: &mut InputRuntime, port: &'static str) -> Result<Self, GraphError> {
+        let mut receivers = runtime.take_receivers::<T>(port).await?;
+        if receivers.len() != 1 {
+            return Err(GraphError::NodeExecution {
+                node: runtime.node_name,
+                message: format!("stream input port `{port}` expected exactly one connection"),
+            });
+        }
+        Ok(Stream::from_receiver(receivers.remove(0)))
+    }
+}
+
+pub trait OutputPortValue: Send + Sized + 'static {
+    /// Used for TypeId-based port-type matching. Distinct per port value type.
+    type EdgeValue: Send + 'static;
+    /// The item type flowing through the underlying mpsc channel.
+    type ChannelItem: Clone + Send + 'static;
+
+    fn schema(name: &'static str) -> PortSchema;
+
+    /// Called before `run()` to extract pre-wired channels from the runtime and
+    /// initialize this field in the output struct. Scalar ports return `Default::default()`.
+    fn initialize_field(runtime: &mut OutputRuntime, port: &'static str) -> Self;
+
+    /// Called after `run()` to flush any buffered scalar values. Stream ports are no-ops.
+    fn finalize_field(
+        self,
+        runtime: &mut OutputRuntime,
+        port: &'static str,
+    ) -> impl Future<Output = Result<(), GraphError>> + Send;
+}
+
+impl<T: PortValue + Default> OutputPortValue for T {
+    type EdgeValue = T;
+    type ChannelItem = T;
+
+    fn schema(name: &'static str) -> PortSchema {
+        PortSchema {
+            name,
+            schema: facet_json_schema::schema_for::<T>(),
+            cardinality: PortCardinality::Single,
+        }
+    }
+
+    fn initialize_field(_runtime: &mut OutputRuntime, _port: &'static str) -> Self {
+        T::default()
+    }
+
+    async fn finalize_field(
+        self,
+        runtime: &mut OutputRuntime,
+        port: &'static str,
+    ) -> Result<(), GraphError> {
         runtime.send(port, self).await
+    }
+}
+
+impl<T: PortValue + Default> OutputPortValue for Stream<T> {
+    type EdgeValue = Stream<T>;
+    type ChannelItem = T;
+
+    fn schema(name: &'static str) -> PortSchema {
+        PortSchema {
+            name,
+            schema: facet_json_schema::schema_for::<T>(),
+            cardinality: PortCardinality::Single,
+        }
+    }
+
+    fn initialize_field(runtime: &mut OutputRuntime, port: &'static str) -> Self {
+        Stream::from_senders(runtime.take_senders::<T>(port))
+    }
+
+    async fn finalize_field(
+        self,
+        _runtime: &mut OutputRuntime,
+        _port: &'static str,
+    ) -> Result<(), GraphError> {
+        // Senders drop here, signaling EOF to all connected consumers.
+        Ok(())
     }
 }
 
@@ -280,7 +398,8 @@ pub trait NodeDefinition: Send + Sync + 'static {
         &self,
         input: Self::Input,
         config: &Self::Config,
-    ) -> impl Future<Output = Result<Self::Output, GraphError>> + Send;
+        output: &mut Self::Output,
+    ) -> impl Future<Output = Result<(), GraphError>> + Send;
 }
 
 pub trait NodeMeta {
@@ -408,7 +527,7 @@ pub struct ErasedInputPort<R> {
 }
 
 impl<R: RegisteredNodeSpec> ErasedInputPort<R> {
-    pub fn new<T: Send + 'static>(port: InputPort<T>) -> Self {
+    pub fn new<T: OutputPortValue + InputPortValue>(port: InputPort<T>) -> Self {
         Self {
             type_id: TypeId::of::<T>(),
             inner: Box::new(port),
@@ -542,7 +661,7 @@ pub struct NodeHandle<Node: NodeDefinition> {
 }
 
 pub struct InputRuntime {
-    node_name: &'static str,
+    pub(crate) node_name: &'static str,
     ports: BTreeMap<&'static str, Vec<Box<dyn Any + Send>>>,
 }
 
@@ -664,7 +783,7 @@ impl OutputRuntime {
                 port,
             })?;
 
-        let mut senders = senders
+        let senders = senders
             .downcast::<Vec<mpsc::Sender<T>>>()
             .map(|boxed| *boxed)
             .map_err(|_| GraphError::NodeExecution {
@@ -672,24 +791,40 @@ impl OutputRuntime {
                 message: format!("output port `{port}` had an unexpected runtime type"),
             })?;
 
-        let sender_count = senders.len();
-        for (index, sender) in senders.iter_mut().enumerate() {
-            let payload = if index + 1 == sender_count {
-                value.clone()
-            } else {
-                value.clone()
-            };
-
+        let (last, rest) = senders.split_last().ok_or(GraphError::MissingOutputPort {
+            node: self.node_name,
+            port,
+        })?;
+        for sender in rest {
             sender
-                .send(payload)
+                .send(value.clone())
                 .await
                 .map_err(|_| GraphError::NodeExecution {
                     node: self.node_name,
                     message: format!("output port `{port}` receiver was closed"),
                 })?;
         }
+        last.send(value)
+            .await
+            .map_err(|_| GraphError::NodeExecution {
+                node: self.node_name,
+                message: format!("output port `{port}` receiver was closed"),
+            })?;
 
         Ok(())
+    }
+
+    /// Extract the senders for a stream output port so they can be moved into `Stream::from_senders`.
+    /// Returns an empty vec if the port has no downstream connections.
+    pub fn take_senders<T: Clone + Send + 'static>(
+        &mut self,
+        port: &'static str,
+    ) -> Vec<mpsc::Sender<T>> {
+        self.ports
+            .remove(port)
+            .and_then(|b| b.downcast::<Vec<mpsc::Sender<T>>>().ok())
+            .map(|b| *b)
+            .unwrap_or_default()
     }
 }
 
@@ -787,8 +922,9 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
             task: Box::new(move |mut inputs, mut outputs| {
                 Box::pin(async move {
                     let input = Node::Input::receive(&mut inputs).await?;
-                    let output = node.run(input, &config).await?;
-                    output.send(&mut outputs).await
+                    let mut output = Node::Output::initialize(&mut outputs);
+                    node.run(input, &config, &mut output).await?;
+                    output.finalize(&mut outputs).await
                 })
             }),
             input_schemas: Node::Input::schema()
@@ -806,14 +942,14 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
         }
     }
 
-    pub fn connect<T: Send + 'static>(
+    pub fn connect<T: OutputPortValue + InputPortValue>(
         &mut self,
         source: OutputPort<T>,
         target: InputPort<T>,
     ) -> Result<(), GraphError> {
         let source_node_id = source.node_id.0;
         let source_port_name = source.name;
-        let sender = self.attach_output(source)?;
+        let receiver = self.attach_output::<T>(source)?;
         let target_node = self
             .nodes
             .get_mut(target.node_id.0)
@@ -826,8 +962,7 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
                 node: target_node.name,
                 port: target.name,
             })?
-            .cardinality
-            .clone();
+            .cardinality;
 
         let existing_connection_count = target_node
             .inputs
@@ -851,7 +986,6 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
             _ => {}
         }
 
-        let (_sender, receiver) = sender;
         target_node
             .inputs
             .entry(target.name)
@@ -919,10 +1053,13 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
         GraphSpec { nodes, edges }
     }
 
-    fn attach_output<T: Send + 'static>(
+    /// Creates a channel for the given output port and returns the receiver end.
+    /// The sender is stored in the source node's OutputRuntime for use during execution.
+    /// On subsequent calls for the same port (fan-out), adds another channel.
+    fn attach_output<T: OutputPortValue>(
         &mut self,
         source: OutputPort<T>,
-    ) -> Result<(mpsc::Sender<T>, mpsc::Receiver<T>), GraphError> {
+    ) -> Result<mpsc::Receiver<T::ChannelItem>, GraphError> {
         let source_node = self
             .nodes
             .get_mut(source.node_id.0)
@@ -930,7 +1067,7 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
 
         if let Some(existing) = source_node.outputs.get_mut(source.name) {
             let senders = existing
-                .downcast_mut::<Vec<mpsc::Sender<T>>>()
+                .downcast_mut::<Vec<mpsc::Sender<T::ChannelItem>>>()
                 .ok_or_else(|| {
                     GraphError::Validation(format!(
                         "output port `{}` on node `{}` had an unexpected runtime type",
@@ -940,14 +1077,14 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
 
             let (sender, receiver) = mpsc::channel(self.channel_capacity);
             senders.push(sender);
-            return Ok((senders.last().expect("sender inserted").clone(), receiver));
+            return Ok(receiver);
         }
 
         let (sender, receiver) = mpsc::channel(self.channel_capacity);
         source_node
             .outputs
-            .insert(source.name, Box::new(vec![sender.clone()]));
-        Ok((sender, receiver))
+            .insert(source.name, Box::new(vec![sender]));
+        Ok(receiver)
     }
 }
 
@@ -1044,7 +1181,9 @@ impl NodeOutputs for () {
         Vec::new()
     }
 
-    async fn send(self, _runtime: &mut OutputRuntime) -> Result<(), GraphError> {
+    fn initialize(_runtime: &mut OutputRuntime) -> Self {}
+
+    async fn finalize(self, _runtime: &mut OutputRuntime) -> Result<(), GraphError> {
         Ok(())
     }
 }

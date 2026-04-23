@@ -28,10 +28,10 @@ impl NodeDefinition for ProducerNode {
         &self,
         _input: Self::Input,
         config: &Self::Config,
-    ) -> Result<Self::Output, GraphError> {
-        Ok(ProducerOutput {
-            value: config.value.to_owned(),
-        })
+        output: &mut Self::Output,
+    ) -> Result<(), GraphError> {
+        output.value = config.value.to_owned();
+        Ok(())
     }
 }
 
@@ -62,10 +62,10 @@ impl NodeDefinition for ScaleNode {
         &self,
         input: Self::Input,
         config: &Self::Config,
-    ) -> Result<Self::Output, GraphError> {
-        Ok(ScaleOutput {
-            result: input.value.into_iter().map(|v| v * config.factor).collect(),
-        })
+        output: &mut Self::Output,
+    ) -> Result<(), GraphError> {
+        output.result = input.value.into_iter().map(|v| v * config.factor).collect();
+        Ok(())
     }
 }
 
@@ -91,7 +91,8 @@ impl NodeDefinition for PrintNode {
         &self,
         input: Self::Input,
         config: &Self::Config,
-    ) -> Result<Self::Output, GraphError> {
+        _output: &mut Self::Output,
+    ) -> Result<(), GraphError> {
         println!("{}: {:?}", config.label, input.value,);
         Ok(())
     }
