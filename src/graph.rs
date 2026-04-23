@@ -114,11 +114,18 @@ impl PortFactory {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PortCardinality {
     Single,
     Many,
     Fixed(usize),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StaticPortInfo {
+    pub name: &'static str,
+    pub cardinality: PortCardinality,
+    pub required: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -178,6 +185,10 @@ pub trait NodeInputs: Send + Sized + 'static {
     -> impl Future<Output = Result<Self, GraphError>> + Send;
 }
 
+pub trait StaticInputPorts {
+    const PORTS: &'static [StaticPortInfo];
+}
+
 pub trait NodeOutputs: Send + Sized + 'static {
     type Ports;
 
@@ -187,6 +198,10 @@ pub trait NodeOutputs: Send + Sized + 'static {
         self,
         runtime: &mut OutputRuntime,
     ) -> impl Future<Output = Result<(), GraphError>> + Send;
+}
+
+pub trait StaticOutputPorts {
+    const PORTS: &'static [StaticPortInfo];
 }
 
 pub trait PortValue: Clone + Send + Sync + Facet<'static> + 'static {}
@@ -277,6 +292,73 @@ pub trait GraphNodeSpec {
     fn kind(&self) -> &'static str;
     fn export_node(&self, id: String) -> Self::Registry;
     fn into_parts(self) -> (Self::Node, <Self::Node as NodeDefinition>::Config);
+}
+
+pub const fn has_port(ports: &[StaticPortInfo], name: &str) -> bool {
+    let mut index = 0;
+    while index < ports.len() {
+        if const_str_eq(ports[index].name, name) {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+pub const fn is_single_port(ports: &[StaticPortInfo], name: &str) -> bool {
+    let mut index = 0;
+    while index < ports.len() {
+        if const_str_eq(ports[index].name, name) {
+            return matches!(ports[index].cardinality, PortCardinality::Single);
+        }
+        index += 1;
+    }
+    false
+}
+
+pub const fn has_missing_required_ports(
+    ports: &[StaticPortInfo],
+    connected: &[&str],
+) -> bool {
+    let mut port_index = 0;
+    while port_index < ports.len() {
+        let port = ports[port_index];
+        if port.required {
+            let mut found = false;
+            let mut connected_index = 0;
+            while connected_index < connected.len() {
+                if const_str_eq(connected[connected_index], port.name) {
+                    found = true;
+                    break;
+                }
+                connected_index += 1;
+            }
+            if !found {
+                return true;
+            }
+        }
+        port_index += 1;
+    }
+    false
+}
+
+pub const fn const_str_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+
+    if left.len() != right.len() {
+        return false;
+    }
+
+    let mut index = 0;
+    while index < left.len() {
+        if left[index] != right[index] {
+            return false;
+        }
+        index += 1;
+    }
+
+    true
 }
 
 pub struct ErasedInputPort<R> {
@@ -875,6 +957,10 @@ impl ErasedInputPorts for () {
     }
 }
 
+impl StaticInputPorts for () {
+    const PORTS: &'static [StaticPortInfo] = &[];
+}
+
 impl NodeOutputs for () {
     type Ports = ();
 
@@ -893,4 +979,8 @@ impl ErasedOutputPorts for () {
     fn output_port(&self, _name: &str) -> Option<ErasedOutputPort> {
         None
     }
+}
+
+impl StaticOutputPorts for () {
+    const PORTS: &'static [StaticPortInfo] = &[];
 }

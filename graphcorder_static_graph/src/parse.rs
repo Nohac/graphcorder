@@ -35,10 +35,12 @@ impl Parse for NodeDecl {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
         input.parse::<kw::node>()?;
         let name = input.parse::<Ident>()?;
+        input.parse::<Token![:]>()?;
+        let spec_ty = input.parse()?;
         input.parse::<Token![=]>()?;
         let expr = input.parse()?;
         input.parse::<Token![;]>()?;
-        Ok(Self { name, expr })
+        Ok(Self { name, spec_ty, expr })
     }
 }
 

@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use proc_macro2::TokenStream;
-use quote::quote;
-use syn::{Error, Result};
+use quote::{quote, quote_spanned};
+use syn::{Error, Result, Type, spanned::Spanned};
 
 use crate::types::{ConnectDecl, Endpoint, GraphItem, NodeDecl, StaticGraphInput};
 
@@ -29,6 +29,8 @@ pub fn expand(input: StaticGraphInput) -> Result<TokenStream> {
         }
     });
 
+    let validation_defs = validation_defs(&node_decls, &connect_decls)?;
+
     let connect_defs = connect_decls.iter().map(|connect| {
         let source_node = &connect.source.node;
         let source_port = &connect.source.port;
@@ -42,6 +44,7 @@ pub fn expand(input: StaticGraphInput) -> Result<TokenStream> {
     Ok(quote! {{
         let instance = ::graphcorder::init::<#registry>();
         let mut builder = instance.builder();
+        #( #validation_defs )*
         #( #node_defs )*
         #( #connect_defs )*
         ::core::result::Result::<
@@ -98,6 +101,85 @@ fn validate(node_decls: &[NodeDecl], connect_decls: &[ConnectDecl]) -> Result<()
         Err(error)
     } else {
         Ok(())
+    }
+}
+
+fn validation_defs(node_decls: &[NodeDecl], connect_decls: &[ConnectDecl]) -> Result<Vec<TokenStream>> {
+    let spec_types = node_decls
+        .iter()
+        .map(|node| (node.name.to_string(), node.spec_ty.clone()))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut defs = Vec::new();
+
+    for connect in connect_decls {
+        let source_spec = spec_types
+            .get(&connect.source.node.to_string())
+            .ok_or_else(|| Error::new_spanned(&connect.source.node, "unknown source node"))?;
+        let target_spec = spec_types
+            .get(&connect.target.node.to_string())
+            .ok_or_else(|| Error::new_spanned(&connect.target.node, "unknown target node"))?;
+
+        defs.push(validate_output_port(source_spec, &connect.source.port));
+        defs.push(validate_input_port(target_spec, &connect.target.port));
+    }
+
+    for node in node_decls {
+        let connected_inputs = connect_decls
+            .iter()
+            .filter(|connect| connect.target.node == node.name)
+            .map(|connect| {
+                let port = connect.target.port.to_string();
+                quote! { #port }
+            })
+            .collect::<Vec<_>>();
+        let spec_ty = &node.spec_ty;
+        let span = node.name.span();
+        defs.push(quote_spanned! {span=>
+            const _: () = {
+                type __NodeInput = <<#spec_ty as ::graphcorder::framework::GraphNodeSpec>::Node as ::graphcorder::framework::NodeDefinition>::Input;
+                if ::graphcorder::framework::has_missing_required_ports(
+                    <__NodeInput as ::graphcorder::framework::StaticInputPorts>::PORTS,
+                    &[ #( #connected_inputs ),* ],
+                ) {
+                    panic!(concat!("missing required input connection on `", stringify!(#spec_ty), "`"));
+                }
+            };
+        });
+    }
+
+    Ok(defs)
+}
+
+fn validate_output_port(spec_ty: &Type, port: &syn::Ident) -> TokenStream {
+    let port_name = port.to_string();
+    let span = port.span();
+    quote_spanned! {span=>
+        const _: () = {
+            type __NodeOutput = <<#spec_ty as ::graphcorder::framework::GraphNodeSpec>::Node as ::graphcorder::framework::NodeDefinition>::Output;
+            if !::graphcorder::framework::has_port(
+                <__NodeOutput as ::graphcorder::framework::StaticOutputPorts>::PORTS,
+                #port_name,
+            ) {
+                panic!(concat!("unknown output port `", #port_name, "` on `", stringify!(#spec_ty), "`"));
+            }
+        };
+    }
+}
+
+fn validate_input_port(spec_ty: &Type, port: &syn::Ident) -> TokenStream {
+    let port_name = port.to_string();
+    let span = port.span();
+    quote_spanned! {span=>
+        const _: () = {
+            type __NodeInput = <<#spec_ty as ::graphcorder::framework::GraphNodeSpec>::Node as ::graphcorder::framework::NodeDefinition>::Input;
+            if !::graphcorder::framework::has_port(
+                <__NodeInput as ::graphcorder::framework::StaticInputPorts>::PORTS,
+                #port_name,
+            ) {
+                panic!(concat!("unknown input port `", #port_name, "` on `", stringify!(#spec_ty), "`"));
+            }
+        };
     }
 }
 

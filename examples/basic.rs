@@ -264,15 +264,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let builder = static_graph! {
         registry: Node;
 
-        node producer = ProducerNodeSpec::new(ProducerConfig {
+        node producer: ProducerNodeSpec = ProducerNodeSpec::new(ProducerConfig {
             value: [6.0, 12.0, 18.0, 24.0].into(),
         });
-        node scale_1x = ScaleNodeSpec::new(ScaleConfig { factor: 1.5 });
-        node scale_2x = ScaleNodeSpec::new(ScaleConfig { factor: 3.0 });
-        node print_1x = PrintNodeSpec::new(PrintConfig {
+        node scale_1x: ScaleNodeSpec = ScaleNodeSpec::new(ScaleConfig { factor: 1.5 });
+        node scale_2x: ScaleNodeSpec = ScaleNodeSpec::new(ScaleConfig { factor: 3.0 });
+        node print_1x: PrintNodeSpec = PrintNodeSpec::new(PrintConfig {
             label: "programmatic result".into(),
         });
-        node print_2x = PrintNodeSpec::new(PrintConfig {
+        node print_2x: PrintNodeSpec = PrintNodeSpec::new(PrintConfig {
             label: "programmatic result2".into(),
         });
 

@@ -80,6 +80,27 @@ fn derive_ports(input: TokenStream, kind: PortKind) -> TokenStream {
         }
     });
 
+    let static_port_items = fields.iter().map(|field| {
+        let name = field.ident.as_ref().expect("named field");
+        let lit = name.to_string();
+        match kind {
+            PortKind::Input => quote! {
+                ::graphcorder::framework::StaticPortInfo {
+                    name: #lit,
+                    cardinality: ::graphcorder::framework::PortCardinality::Single,
+                    required: true,
+                }
+            },
+            PortKind::Output => quote! {
+                ::graphcorder::framework::StaticPortInfo {
+                    name: #lit,
+                    cardinality: ::graphcorder::framework::PortCardinality::Single,
+                    required: true,
+                }
+            },
+        }
+    });
+
     let expanded = match kind {
         PortKind::Input => {
             let receive_fields = fields.iter().map(|field| {
@@ -133,6 +154,12 @@ fn derive_ports(input: TokenStream, kind: PortKind) -> TokenStream {
                             _ => None,
                         }
                     }
+                }
+
+                impl ::graphcorder::framework::StaticInputPorts for #struct_name {
+                    const PORTS: &'static [::graphcorder::framework::StaticPortInfo] = &[
+                        #( #static_port_items, )*
+                    ];
                 }
             }
         }
@@ -190,6 +217,12 @@ fn derive_ports(input: TokenStream, kind: PortKind) -> TokenStream {
                             _ => None,
                         }
                     }
+                }
+
+                impl ::graphcorder::framework::StaticOutputPorts for #struct_name {
+                    const PORTS: &'static [::graphcorder::framework::StaticPortInfo] = &[
+                        #( #static_port_items, )*
+                    ];
                 }
             }
         }

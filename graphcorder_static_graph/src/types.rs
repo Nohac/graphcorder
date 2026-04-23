@@ -12,6 +12,7 @@ pub enum GraphItem {
 
 pub struct NodeDecl {
     pub name: Ident,
+    pub spec_ty: Type,
     pub expr: Expr,
 }
 
