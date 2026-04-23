@@ -112,12 +112,73 @@ impl NodeDefinition for ScaleNode {
     }
 }
 
+/// Produces values into a stream with an explicit channel buffer capacity of 2.
+/// The `Stream<f32, 2>` means at most 2 values can be buffered before the producer
+/// blocks waiting for a consumer to catch up.
+#[derive(NodeOutputs)]
+struct BoundedCounterOutput {
+    values: Stream<f32, 2>,
+}
+
+#[derive(GraphNode)]
+struct BoundedCounterNode;
+
+impl NodeDefinition for BoundedCounterNode {
+    type Config = CounterConfig;
+    type Input = ();
+    type Output = BoundedCounterOutput;
+
+    async fn run(
+        &self,
+        _input: (),
+        config: &Self::Config,
+        output: &mut Self::Output,
+    ) -> Result<(), GraphError> {
+        for i in 0..config.count {
+            let value = i as f32;
+            println!("[bounded producer] sending {value}");
+            output.values.send(value).await?;
+        }
+        println!("[bounded producer] done");
+        Ok(())
+    }
+}
+
+/// Consumer that matches the bounded producer's Stream<f32, 2> port type.
+#[derive(NodeInputs)]
+struct BoundedPrintInput {
+    values: Stream<f32, 2>,
+}
+
+#[derive(GraphNode)]
+struct BoundedPrintNode;
+
+impl NodeDefinition for BoundedPrintNode {
+    type Config = PrintConfig;
+    type Input = BoundedPrintInput;
+    type Output = ();
+
+    async fn run(
+        &self,
+        mut input: Self::Input,
+        config: &Self::Config,
+        _output: &mut (),
+    ) -> Result<(), GraphError> {
+        while let Some(v) = input.values.next().await {
+            println!("[{}] received {v}", config.label);
+        }
+        Ok(())
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Debug, Facet, NodeRegistry)]
 enum Node {
     Counter(CounterGraphNode),
+    BoundedCounter(BoundedCounterGraphNode),
     Scale(ScaleGraphNode),
     Print(PrintGraphNode),
+    BoundedPrint(BoundedPrintGraphNode),
 }
 
 #[tokio::main]
@@ -127,16 +188,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let builder = static_graph! {
             registry: Node;
             node source = CounterNode { count: 5 };
+            node scale  = ScaleNode { factor: 10.0 };
             node a = PrintNode { label: "A".into() };
             node b = PrintNode { label: "B".into() };
-            connect source -> a;
-            connect source -> b;
+            connect source -> [scale, b];
+            connect scale -> a;
         }?;
         builder.build().run().await?;
     }
 
     println!("\n=== pipeline: stream -> scale -> print ===");
-
     {
         let builder = static_graph! {
             registry: Node;
@@ -145,6 +206,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             node sink   = PrintNode { label: "scaled".into() };
             connect source -> scale;
             connect scale  -> sink;
+        }?;
+        builder.build().run().await?;
+    }
+
+    println!("\n=== bounded stream (capacity 2) ===");
+    {
+        let builder = static_graph! {
+            registry: Node;
+            node source = BoundedCounterNode { count: 6 };
+            node sink   = BoundedPrintNode { label: "bounded".into() };
+            connect source -> sink;
         }?;
         builder.build().run().await?;
     }

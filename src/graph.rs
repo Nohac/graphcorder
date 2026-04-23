@@ -221,7 +221,10 @@ impl<T: PortValue, const N: usize> PortValue for [T; N] {}
 
 /// A streaming port value: producers push values with [`send`](Stream::send) during
 /// `run()`; consumers receive them one at a time via [`next`](Stream::next).
-pub struct Stream<T: Clone + Send + 'static> {
+///
+/// The optional const parameter `N` sets the mpsc channel buffer capacity for this port.
+/// `N = 0` (the default) uses the capacity configured on [`GraphBuilder`].
+pub struct Stream<T: Clone + Send + 'static, const N: usize = 0> {
     inner: StreamInner<T>,
 }
 
@@ -230,7 +233,7 @@ enum StreamInner<T: Clone + Send + 'static> {
     Input(mpsc::Receiver<T>),
 }
 
-impl<T: Clone + Send + 'static> Stream<T> {
+impl<T: Clone + Send + 'static, const N: usize> Stream<T, N> {
     pub(crate) fn from_senders(senders: Vec<mpsc::Sender<T>>) -> Self {
         Self {
             inner: StreamInner::Output(senders),
@@ -267,7 +270,7 @@ impl<T: Clone + Send + 'static> Stream<T> {
 }
 
 // Safety: Vec<mpsc::Sender<T>>: Send when T: Send; mpsc::Receiver<T>: Send when T: Send.
-unsafe impl<T: Clone + Send + 'static> Send for Stream<T> {}
+unsafe impl<T: Clone + Send + 'static, const N: usize> Send for Stream<T, N> {}
 
 pub trait InputPortValue: Send + Sized + 'static {
     type EdgeValue: Send + 'static;
@@ -295,8 +298,8 @@ impl<T: PortValue> InputPortValue for T {
     }
 }
 
-impl<T: PortValue> InputPortValue for Stream<T> {
-    type EdgeValue = Stream<T>;
+impl<T: PortValue, const N: usize> InputPortValue for Stream<T, N> {
+    type EdgeValue = Stream<T, N>;
 
     fn schema(name: &'static str) -> PortSchema {
         PortSchema {
@@ -325,6 +328,12 @@ pub trait OutputPortValue: Send + Sized + 'static {
     type ChannelItem: Clone + Send + 'static;
 
     fn schema(name: &'static str) -> PortSchema;
+
+    /// Per-port channel buffer capacity override. `None` uses the builder's default.
+    /// Override this for `Stream<T, N>` ports to use a fixed capacity of `N`.
+    fn channel_capacity() -> Option<usize> {
+        None
+    }
 
     /// Called before `run()` to extract pre-wired channels from the runtime and
     /// initialize this field in the output struct. Scalar ports return `Default::default()`.
@@ -363,8 +372,8 @@ impl<T: PortValue + Default> OutputPortValue for T {
     }
 }
 
-impl<T: PortValue + Default> OutputPortValue for Stream<T> {
-    type EdgeValue = Stream<T>;
+impl<T: PortValue + Default, const N: usize> OutputPortValue for Stream<T, N> {
+    type EdgeValue = Stream<T, N>;
     type ChannelItem = T;
 
     fn schema(name: &'static str) -> PortSchema {
@@ -373,6 +382,10 @@ impl<T: PortValue + Default> OutputPortValue for Stream<T> {
             schema: facet_json_schema::schema_for::<T>(),
             cardinality: PortCardinality::Single,
         }
+    }
+
+    fn channel_capacity() -> Option<usize> {
+        (N > 0).then_some(N)
     }
 
     fn initialize_field(runtime: &mut OutputRuntime, port: &'static str) -> Self {
@@ -1065,6 +1078,8 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
             .get_mut(source.node_id.0)
             .ok_or_else(|| GraphError::Validation("source node did not exist".into()))?;
 
+        let cap = T::channel_capacity().unwrap_or(self.channel_capacity);
+
         if let Some(existing) = source_node.outputs.get_mut(source.name) {
             let senders = existing
                 .downcast_mut::<Vec<mpsc::Sender<T::ChannelItem>>>()
@@ -1075,12 +1090,12 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
                     ))
                 })?;
 
-            let (sender, receiver) = mpsc::channel(self.channel_capacity);
+            let (sender, receiver) = mpsc::channel(cap);
             senders.push(sender);
             return Ok(receiver);
         }
 
-        let (sender, receiver) = mpsc::channel(self.channel_capacity);
+        let (sender, receiver) = mpsc::channel(cap);
         source_node
             .outputs
             .insert(source.name, Box::new(vec![sender]));
