@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
 use syn::{Error, Result, Type};
 
 use crate::types::{ConnectDecl, Endpoint, EndpointSet, GraphItem, NodeDecl, StaticGraphInput};
@@ -20,6 +20,15 @@ pub fn expand(input: StaticGraphInput) -> Result<TokenStream> {
     }
 
     validate(&node_decls, &connect_decls)?;
+
+    let port_validations = connect_decls
+        .iter()
+        .map(|connect| expand_port_validation(connect, &node_decls))
+        .collect::<Result<Vec<_>>>()?;
+    let node_validations = node_decls
+        .iter()
+        .map(|node| expand_required_input_validation(node, &connect_decls, &node_decls))
+        .collect::<Result<Vec<_>>>()?;
 
     let node_defs = node_decls.iter().map(|node| {
         let name = &node.name;
@@ -47,6 +56,8 @@ pub fn expand(input: StaticGraphInput) -> Result<TokenStream> {
     Ok(quote! {{
         let instance = ::graphcorder::init::<#registry>();
         let mut builder = instance.builder();
+        #( #port_validations )*
+        #( #node_validations )*
         #( #node_defs )*
         #( #connect_defs )*
         ::core::result::Result::<
@@ -118,6 +129,102 @@ fn expand_named_connect(
     })
 }
 
+fn expand_port_validation(connect: &ConnectDecl, nodes: &[NodeDecl]) -> Result<TokenStream> {
+    let source_validations = endpoints(&connect.source)
+        .iter()
+        .map(|source| expand_endpoint_validation(source, nodes, true))
+        .collect::<Result<Vec<_>>>()?;
+    let target_validations = endpoints(&connect.target)
+        .iter()
+        .map(|target| expand_endpoint_validation(target, nodes, false))
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(quote! {
+        #( #source_validations )*
+        #( #target_validations )*
+    })
+}
+
+fn expand_endpoint_validation(
+    endpoint: &Endpoint,
+    nodes: &[NodeDecl],
+    is_source: bool,
+) -> Result<TokenStream> {
+    let node_ty = find_node_ty(nodes, &endpoint.node)?;
+
+    let (ports_expr, role) = if is_source {
+        (
+            quote! {
+                <<<#node_ty as ::graphcorder::framework::StaticNodeDsl>::Node as ::graphcorder::framework::NodeDefinition>::Output as ::graphcorder::framework::StaticOutputPorts>::PORTS
+            },
+            "output",
+        )
+    } else {
+        (
+            quote! {
+                <<<#node_ty as ::graphcorder::framework::StaticNodeDsl>::Node as ::graphcorder::framework::NodeDefinition>::Input as ::graphcorder::framework::StaticInputPorts>::PORTS
+            },
+            "input",
+        )
+    };
+
+    if let Some(port) = &endpoint.port {
+        let port_name = port.to_string();
+        let message = format!("unknown {role} port `{port_name}`");
+        let span = port.span();
+        Ok(quote_spanned! {span=>
+            const _: () = {
+                if !::graphcorder::framework::has_port(#ports_expr, #port_name) {
+                    panic!(#message);
+                }
+            };
+        })
+    } else {
+        let message = if is_source {
+            "implicit source port requires exactly one output port"
+        } else {
+            "implicit target port requires exactly one input port"
+        };
+        let span = endpoint.node.span();
+        Ok(quote_spanned! {span=>
+            const _: () = {
+                if ::graphcorder::framework::only_port_name(#ports_expr).is_none() {
+                    panic!(#message);
+                }
+            };
+        })
+    }
+}
+
+fn expand_required_input_validation(
+    node: &NodeDecl,
+    connect_decls: &[ConnectDecl],
+    nodes: &[NodeDecl],
+) -> Result<TokenStream> {
+    let node_ty = &node.node_ty;
+    let connected_ports = connect_decls
+        .iter()
+        .flat_map(|connect| endpoints(&connect.target).iter().cloned())
+        .filter(|target| target.node == node.name)
+        .map(|target| resolved_target_port_expr(&target, nodes))
+        .collect::<Result<Vec<_>>>()?;
+
+    let span = node.name.span();
+    Ok(quote_spanned! {span=>
+        const _: () = {
+            const PORTS: &[::graphcorder::framework::StaticPortInfo] =
+                <<<#node_ty as ::graphcorder::framework::StaticNodeDsl>::Node as ::graphcorder::framework::NodeDefinition>::Input as ::graphcorder::framework::StaticInputPorts>::PORTS;
+            const CONNECTED: &[&str] = &[ #( #connected_ports ),* ];
+            if ::graphcorder::framework::has_duplicate_single_connections(PORTS, CONNECTED) {
+                panic!("duplicate connection to single input port");
+            }
+            if ::graphcorder::framework::has_missing_required_ports(PORTS, CONNECTED) {
+                panic!("node is missing required input connections");
+            }
+        };
+    })
+}
+
 fn source_port_expr(endpoint: &Endpoint, node_ty: &Type) -> Result<TokenStream> {
     if let Some(port) = &endpoint.port {
         let port_name = port.to_string();
@@ -132,6 +239,20 @@ fn source_port_expr(endpoint: &Endpoint, node_ty: &Type) -> Result<TokenStream> 
 }
 
 fn target_port_expr(endpoint: &Endpoint, node_ty: &Type) -> Result<TokenStream> {
+    if let Some(port) = &endpoint.port {
+        let port_name = port.to_string();
+        Ok(quote! { #port_name })
+    } else {
+        Ok(quote! {
+            ::graphcorder::framework::only_port_name(
+                <<<#node_ty as ::graphcorder::framework::StaticNodeDsl>::Node as ::graphcorder::framework::NodeDefinition>::Input as ::graphcorder::framework::StaticInputPorts>::PORTS
+            ).expect("implicit target port requires exactly one input port")
+        })
+    }
+}
+
+fn resolved_target_port_expr(endpoint: &Endpoint, nodes: &[NodeDecl]) -> Result<TokenStream> {
+    let node_ty = find_node_ty(nodes, &endpoint.node)?;
     if let Some(port) = &endpoint.port {
         let port_name = port.to_string();
         Ok(quote! { #port_name })

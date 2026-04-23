@@ -348,6 +348,32 @@ pub const fn has_missing_required_ports(ports: &[StaticPortInfo], connected: &[&
     false
 }
 
+pub const fn has_duplicate_single_connections(
+    ports: &[StaticPortInfo],
+    connected: &[&str],
+) -> bool {
+    let mut connected_index = 0;
+    while connected_index < connected.len() {
+        let current = connected[connected_index];
+        if is_single_port(ports, current) {
+            let mut seen = 0;
+            let mut inner_index = 0;
+            while inner_index < connected.len() {
+                if const_str_eq(connected[inner_index], current) {
+                    seen += 1;
+                    if seen > 1 {
+                        return true;
+                    }
+                }
+                inner_index += 1;
+            }
+        }
+        connected_index += 1;
+    }
+
+    false
+}
+
 pub const fn only_port_name(ports: &[StaticPortInfo]) -> Option<&'static str> {
     if ports.len() == 1 {
         Some(ports[0].name)
