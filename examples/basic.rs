@@ -2,10 +2,10 @@ use enum_dispatch::enum_dispatch;
 use facet::Facet;
 use facet_pretty::FacetPretty;
 use graphcorder::{
-    NodeInputs, NodeOutputs,
+    GraphNode, NodeInputs, NodeOutputs,
     framework::{
-        BuiltGraphNode, GraphError, GraphNode, GraphNodeSpec, GraphSpec, NodeDefinition,
-        RegisteredNodeSpec, StaticNodeDsl,
+        BuiltGraphNode, GraphError, GraphNode as ExportedGraphNode, GraphSpec, NodeDefinition,
+        RegisteredNodeSpec,
     },
     static_graph,
 };
@@ -15,30 +15,18 @@ struct ProducerConfig {
     value: Vec<f32>,
 }
 
-#[derive(Clone, Debug, Facet)]
-struct ProducerNodeSpec {
-    config: ProducerConfig,
-}
-
 #[derive(Clone, Debug, Facet, NodeOutputs)]
 struct ProducerOutput {
     value: Vec<f32>,
 }
 
+#[derive(GraphNode)]
 struct ProducerNode;
-
-impl ProducerNodeSpec {
-    fn new(config: ProducerConfig) -> Self {
-        Self { config }
-    }
-}
 
 impl NodeDefinition for ProducerNode {
     type Config = ProducerConfig;
     type Input = ();
     type Output = ProducerOutput;
-
-    const KIND: &'static str = "producer";
 
     async fn run(
         &self,
@@ -51,37 +39,9 @@ impl NodeDefinition for ProducerNode {
     }
 }
 
-impl GraphNodeSpec for ProducerNodeSpec {
-    type Node = ProducerNode;
-    type Registry = Node;
-
-    fn export_node(&self, id: String) -> Self::Registry {
-        Node::Producer(GraphNode::new(id, self.config.clone()))
-    }
-
-    fn into_parts(self) -> (Self::Node, ProducerConfig) {
-        (ProducerNode, self.config)
-    }
-}
-
-impl StaticNodeDsl for ProducerNode {
-    type Config = ProducerConfig;
-    type Node = ProducerNode;
-    type Spec = ProducerNodeSpec;
-
-    fn from_config(config: Self::Config) -> Self::Spec {
-        ProducerNodeSpec::new(config)
-    }
-}
-
 #[derive(Clone, Debug, Facet)]
 struct ScaleConfig {
     factor: f32,
-}
-
-#[derive(Clone, Debug, Facet)]
-struct ScaleNodeSpec {
-    config: ScaleConfig,
 }
 
 #[derive(Clone, Debug, Facet, NodeInputs)]
@@ -94,20 +54,13 @@ struct ScaleOutput {
     result: Vec<f32>,
 }
 
+#[derive(GraphNode)]
 struct ScaleNode;
-
-impl ScaleNodeSpec {
-    fn new(config: ScaleConfig) -> Self {
-        Self { config }
-    }
-}
 
 impl NodeDefinition for ScaleNode {
     type Config = ScaleConfig;
     type Input = ScaleInput;
     type Output = ScaleOutput;
-
-    const KIND: &'static str = "scale";
 
     async fn run(
         &self,
@@ -120,41 +73,9 @@ impl NodeDefinition for ScaleNode {
     }
 }
 
-impl GraphNodeSpec for ScaleNodeSpec {
-    type Node = ScaleNode;
-    type Registry = Node;
-
-    fn kind(&self) -> &'static str {
-        ScaleNode::KIND
-    }
-
-    fn export_node(&self, id: String) -> Self::Registry {
-        Node::Scale(GraphNode::new(id, self.config.clone()))
-    }
-
-    fn into_parts(self) -> (Self::Node, ScaleConfig) {
-        (ScaleNode, self.config)
-    }
-}
-
-impl StaticNodeDsl for ScaleNode {
-    type Config = ScaleConfig;
-    type Node = ScaleNode;
-    type Spec = ScaleNodeSpec;
-
-    fn from_config(config: Self::Config) -> Self::Spec {
-        ScaleNodeSpec::new(config)
-    }
-}
-
 #[derive(Clone, Debug, Facet)]
 struct PrintConfig {
     label: String,
-}
-
-#[derive(Clone, Debug, Facet)]
-struct PrintNodeSpec {
-    config: PrintConfig,
 }
 
 #[derive(Clone, Debug, Facet, NodeInputs)]
@@ -162,20 +83,13 @@ struct PrintInput {
     value: Vec<f32>,
 }
 
+#[derive(GraphNode)]
 struct PrintNode;
-
-impl PrintNodeSpec {
-    fn new(config: PrintConfig) -> Self {
-        Self { config }
-    }
-}
 
 impl NodeDefinition for PrintNode {
     type Config = PrintConfig;
     type Input = PrintInput;
     type Output = ();
-
-    const KIND: &'static str = "print";
 
     async fn run(
         &self,
@@ -184,29 +98,6 @@ impl NodeDefinition for PrintNode {
     ) -> Result<Self::Output, GraphError> {
         println!("{}: {:?}", config.label, input.value,);
         Ok(())
-    }
-}
-
-impl GraphNodeSpec for PrintNodeSpec {
-    type Node = PrintNode;
-    type Registry = Node;
-
-    fn export_node(&self, id: String) -> Self::Registry {
-        Node::Print(GraphNode::new(id, self.config.clone()))
-    }
-
-    fn into_parts(self) -> (Self::Node, PrintConfig) {
-        (PrintNode, self.config)
-    }
-}
-
-impl StaticNodeDsl for PrintNode {
-    type Config = PrintConfig;
-    type Node = PrintNode;
-    type Spec = PrintNodeSpec;
-
-    fn from_config(config: Self::Config) -> Self::Spec {
-        PrintNodeSpec::new(config)
     }
 }
 
@@ -223,12 +114,12 @@ trait ExampleNodeRegistry {
 #[derive(Clone, Debug, Facet)]
 #[enum_dispatch(ExampleNodeRegistry)]
 enum Node {
-    Producer(GraphNode<ProducerConfig>),
-    Scale(GraphNode<ScaleConfig>),
-    Print(GraphNode<PrintConfig>),
+    Producer(ExportedGraphNode<ProducerConfig>),
+    Scale(ExportedGraphNode<ScaleConfig>),
+    Print(ExportedGraphNode<PrintConfig>),
 }
 
-impl ExampleNodeRegistry for GraphNode<ProducerConfig> {
+impl ExampleNodeRegistry for ExportedGraphNode<ProducerConfig> {
     fn id(&self) -> &str {
         &self.id
     }
@@ -241,7 +132,7 @@ impl ExampleNodeRegistry for GraphNode<ProducerConfig> {
     }
 }
 
-impl ExampleNodeRegistry for GraphNode<ScaleConfig> {
+impl ExampleNodeRegistry for ExportedGraphNode<ScaleConfig> {
     fn id(&self) -> &str {
         &self.id
     }
@@ -254,7 +145,7 @@ impl ExampleNodeRegistry for GraphNode<ScaleConfig> {
     }
 }
 
-impl ExampleNodeRegistry for GraphNode<PrintConfig> {
+impl ExampleNodeRegistry for ExportedGraphNode<PrintConfig> {
     fn id(&self) -> &str {
         &self.id
     }
@@ -298,7 +189,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             label: "programmatic result2".into(),
         };
 
-        connect scale_1x -> scale_2x;
         connect producer -> [scale_1x, scale_2x];
         connect scale_1x -> print_1x;
         connect scale_2x -> print_2x;

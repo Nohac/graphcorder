@@ -276,8 +276,6 @@ pub trait NodeDefinition: Send + Sync + 'static {
     type Input: NodeInputs;
     type Output: NodeOutputs;
 
-    const KIND: &'static str;
-
     fn run(
         &self,
         input: Self::Input,
@@ -285,13 +283,13 @@ pub trait NodeDefinition: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Self::Output, GraphError>> + Send;
 }
 
-pub trait GraphNodeSpec {
-    type Node: NodeDefinition;
-    type Registry: RegisteredNodeSpec;
+pub trait NodeMeta {
+    const KIND: &'static str;
+}
 
-    fn kind(&self) -> &'static str {
-        Self::Node::KIND
-    }
+pub trait GraphNodeSpec {
+    type Node: NodeDefinition + NodeMeta;
+    type Registry;
 
     fn export_node(&self, id: String) -> Self::Registry;
     fn into_parts(self) -> (Self::Node, <Self::Node as NodeDefinition>::Config);
@@ -299,7 +297,7 @@ pub trait GraphNodeSpec {
 
 pub trait StaticNodeDsl {
     type Config;
-    type Node: NodeDefinition;
+    type Node: NodeDefinition + NodeMeta;
     type Spec: GraphNodeSpec<Node = Self::Node>;
 
     fn from_config(config: Self::Config) -> Self::Spec;
@@ -729,19 +727,20 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
     where
         Spec::Registry: Into<R>,
     {
+        let kind = <Spec::Node as NodeMeta>::KIND;
         let next = self
             .next_id_by_kind
-            .entry(spec.kind())
+            .entry(kind)
             .and_modify(|count| *count += 1)
             .or_insert(1);
-        let assigned_id = format!("{}_{}", spec.kind(), *next);
+        let assigned_id = format!("{}_{}", kind, *next);
         self.node_specs
             .push(spec.export_node(assigned_id.clone()).into());
         let (node, config) = spec.into_parts();
         self.add_node(assigned_id, node, config)
     }
 
-    fn add_node<Node: NodeDefinition>(
+    fn add_node<Node: NodeDefinition + NodeMeta>(
         &mut self,
         assigned_id: String,
         node: Node,

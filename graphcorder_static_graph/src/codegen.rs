@@ -85,7 +85,11 @@ fn expand_connect(connect: &ConnectDecl, nodes: &[NodeDecl]) -> Result<TokenStre
     }
 }
 
-fn expand_named_connect(source: &Endpoint, target: &Endpoint, nodes: &[NodeDecl]) -> Result<TokenStream> {
+fn expand_named_connect(
+    source: &Endpoint,
+    target: &Endpoint,
+    nodes: &[NodeDecl],
+) -> Result<TokenStream> {
     if let (Some(source_port), Some(target_port)) = (&source.port, &target.port) {
         let source_node = &source.node;
         let target_node = &target.node;
@@ -187,7 +191,8 @@ fn validate(node_decls: &[NodeDecl], connect_decls: &[ConnectDecl]) -> Result<()
 }
 
 fn find_node_ty<'a>(nodes: &'a [NodeDecl], name: &syn::Ident) -> Result<&'a Type> {
-    nodes.iter()
+    nodes
+        .iter()
         .find(|node| node.name == *name)
         .map(|node| &node.node_ty)
         .ok_or_else(|| Error::new_spanned(name, "unknown node"))
