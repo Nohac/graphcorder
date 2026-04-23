@@ -55,10 +55,6 @@ impl GraphNodeSpec for ProducerNodeSpec {
     type Node = ProducerNode;
     type Registry = Node;
 
-    fn kind(&self) -> &'static str {
-        ProducerNode::KIND
-    }
-
     fn export_node(&self, id: String) -> Self::Registry {
         Node::Producer(GraphNode::new(id, self.config.clone()))
     }
@@ -195,10 +191,6 @@ impl GraphNodeSpec for PrintNodeSpec {
     type Node = PrintNode;
     type Registry = Node;
 
-    fn kind(&self) -> &'static str {
-        PrintNode::KIND
-    }
-
     fn export_node(&self, id: String) -> Self::Registry {
         Node::Print(GraphNode::new(id, self.config.clone()))
     }
@@ -295,7 +287,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         registry: Node;
 
         node producer = ProducerNode {
-            value: [6.0, 12.0, 18.0, 24.0].into(),
+            value: vec![6.0, 12.0, 18.0, 24.0],
         };
         node scale_1x = ScaleNode { factor: 1.5 };
         node scale_2x = ScaleNode { factor: 3.0 };
@@ -306,6 +298,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             label: "programmatic result2".into(),
         };
 
+        connect scale_1x -> scale_2x;
         connect producer -> [scale_1x, scale_2x];
         connect scale_1x -> print_1x;
         connect scale_2x -> print_2x;

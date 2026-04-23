@@ -289,7 +289,10 @@ pub trait GraphNodeSpec {
     type Node: NodeDefinition;
     type Registry: RegisteredNodeSpec;
 
-    fn kind(&self) -> &'static str;
+    fn kind(&self) -> &'static str {
+        Self::Node::KIND
+    }
+
     fn export_node(&self, id: String) -> Self::Registry;
     fn into_parts(self) -> (Self::Node, <Self::Node as NodeDefinition>::Config);
 }
@@ -324,10 +327,7 @@ pub const fn is_single_port(ports: &[StaticPortInfo], name: &str) -> bool {
     false
 }
 
-pub const fn has_missing_required_ports(
-    ports: &[StaticPortInfo],
-    connected: &[&str],
-) -> bool {
+pub const fn has_missing_required_ports(ports: &[StaticPortInfo], connected: &[&str]) -> bool {
     let mut port_index = 0;
     while port_index < ports.len() {
         let port = ports[port_index];
@@ -479,12 +479,14 @@ impl<R: RegisteredNodeSpec> BuiltGraphNode<R> {
         target: &BuiltGraphNode<R>,
         to_port: &str,
     ) -> Result<(), GraphError> {
-        let source = self.inner.output_port(from_port).ok_or_else(|| {
-            GraphError::Validation(format!("missing output port `{from_port}`"))
-        })?;
-        let target = target.inner.input_port(to_port).ok_or_else(|| {
-            GraphError::Validation(format!("missing input port `{to_port}`"))
-        })?;
+        let source = self
+            .inner
+            .output_port(from_port)
+            .ok_or_else(|| GraphError::Validation(format!("missing output port `{from_port}`")))?;
+        let target = target
+            .inner
+            .input_port(to_port)
+            .ok_or_else(|| GraphError::Validation(format!("missing input port `{to_port}`")))?;
 
         if source.type_id != target.type_id {
             return Err(GraphError::Validation(format!(
@@ -568,10 +570,13 @@ impl InputRuntime {
     ) -> Result<Vec<T>, GraphError> {
         let mut values = Vec::new();
         for mut receiver in self.take_receivers(port).await? {
-            let value = receiver.recv().await.ok_or_else(|| GraphError::NodeExecution {
-                node: self.node_name,
-                message: format!("input port `{port}` closed before producing a value"),
-            })?;
+            let value = receiver
+                .recv()
+                .await
+                .ok_or_else(|| GraphError::NodeExecution {
+                    node: self.node_name,
+                    message: format!("input port `{port}` closed before producing a value"),
+                })?;
             values.push(value);
         }
         Ok(values)
@@ -595,10 +600,13 @@ impl InputRuntime {
 
         let mut values = Vec::with_capacity(expected);
         for mut receiver in receivers {
-            let value = receiver.recv().await.ok_or_else(|| GraphError::NodeExecution {
-                node: self.node_name,
-                message: format!("input port `{port}` closed before producing a value"),
-            })?;
+            let value = receiver
+                .recv()
+                .await
+                .ok_or_else(|| GraphError::NodeExecution {
+                    node: self.node_name,
+                    message: format!("input port `{port}` closed before producing a value"),
+                })?;
             values.push(value);
         }
         Ok(values)
@@ -717,10 +725,7 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
         self
     }
 
-    pub fn add<Spec: GraphNodeSpec>(
-        &mut self,
-        spec: Spec,
-    ) -> NodeHandle<Spec::Node>
+    pub fn add<Spec: GraphNodeSpec>(&mut self, spec: Spec) -> NodeHandle<Spec::Node>
     where
         Spec::Registry: Into<R>,
     {
@@ -730,7 +735,8 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
             .and_modify(|count| *count += 1)
             .or_insert(1);
         let assigned_id = format!("{}_{}", spec.kind(), *next);
-        self.node_specs.push(spec.export_node(assigned_id.clone()).into());
+        self.node_specs
+            .push(spec.export_node(assigned_id.clone()).into());
         let (node, config) = spec.into_parts();
         self.add_node(assigned_id, node, config)
     }
@@ -892,10 +898,12 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
         if let Some(existing) = source_node.outputs.get_mut(source.name) {
             let senders = existing
                 .downcast_mut::<Vec<mpsc::Sender<T>>>()
-                .ok_or_else(|| GraphError::Validation(format!(
-                    "output port `{}` on node `{}` had an unexpected runtime type",
-                    source.name, source_node.name
-                )))?;
+                .ok_or_else(|| {
+                    GraphError::Validation(format!(
+                        "output port `{}` on node `{}` had an unexpected runtime type",
+                        source.name, source_node.name
+                    ))
+                })?;
 
             let (sender, receiver) = mpsc::channel(self.channel_capacity);
             senders.push(sender);
@@ -903,7 +911,9 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
         }
 
         let (sender, receiver) = mpsc::channel(self.channel_capacity);
-        source_node.outputs.insert(source.name, Box::new(vec![sender.clone()]));
+        source_node
+            .outputs
+            .insert(source.name, Box::new(vec![sender.clone()]));
         Ok((sender, receiver))
     }
 }
