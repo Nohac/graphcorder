@@ -496,6 +496,14 @@ impl<R: RegisteredNodeSpec> BuiltGraphNode<R> {
     }
 }
 
+pub trait NodeRegistryEntry: Clone + Send + Sync + Facet<'static> + 'static {
+    fn id(&self) -> &str;
+    fn add_to_builder<R>(&self, builder: &mut GraphBuilder<R>) -> BuiltGraphNode<R>
+    where
+        Self: Into<R>,
+        R: RegisteredNodeSpec;
+}
+
 pub trait RegisteredNodeSpec: Clone + Send + Sync + Facet<'static> + 'static {
     fn id(&self) -> &str;
     fn add_to_builder(&self, builder: &mut GraphBuilder<Self>) -> BuiltGraphNode<Self>;

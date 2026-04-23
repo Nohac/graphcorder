@@ -1,12 +1,8 @@
-use enum_dispatch::enum_dispatch;
 use facet::Facet;
 use facet_pretty::FacetPretty;
 use graphcorder::{
-    GraphNode, NodeInputs, NodeOutputs,
-    framework::{
-        BuiltGraphNode, GraphError, GraphNode as ExportedGraphNode, GraphSpec, NodeDefinition,
-        RegisteredNodeSpec,
-    },
+    GraphNode, NodeInputs, NodeOutputs, NodeRegistry,
+    framework::{GraphError, GraphSpec, NodeDefinition},
     static_graph,
 };
 
@@ -101,74 +97,12 @@ impl NodeDefinition for PrintNode {
     }
 }
 
-#[enum_dispatch]
-trait ExampleNodeRegistry {
-    fn id(&self) -> &str;
-    fn add_to_builder(
-        &self,
-        builder: &mut graphcorder::framework::GraphBuilder<Node>,
-    ) -> BuiltGraphNode<Node>;
-}
-
 #[repr(C)]
-#[derive(Clone, Debug, Facet)]
-#[enum_dispatch(ExampleNodeRegistry)]
+#[derive(Clone, Debug, Facet, NodeRegistry)]
 enum Node {
-    Producer(ExportedGraphNode<ProducerConfig>),
-    Scale(ExportedGraphNode<ScaleConfig>),
-    Print(ExportedGraphNode<PrintConfig>),
-}
-
-impl ExampleNodeRegistry for ExportedGraphNode<ProducerConfig> {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn add_to_builder(
-        &self,
-        builder: &mut graphcorder::framework::GraphBuilder<Node>,
-    ) -> BuiltGraphNode<Node> {
-        BuiltGraphNode::from_handle(builder.add(ProducerNodeSpec::new(self.config.clone())))
-    }
-}
-
-impl ExampleNodeRegistry for ExportedGraphNode<ScaleConfig> {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn add_to_builder(
-        &self,
-        builder: &mut graphcorder::framework::GraphBuilder<Node>,
-    ) -> BuiltGraphNode<Node> {
-        BuiltGraphNode::from_handle(builder.add(ScaleNodeSpec::new(self.config.clone())))
-    }
-}
-
-impl ExampleNodeRegistry for ExportedGraphNode<PrintConfig> {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn add_to_builder(
-        &self,
-        builder: &mut graphcorder::framework::GraphBuilder<Node>,
-    ) -> BuiltGraphNode<Node> {
-        BuiltGraphNode::from_handle(builder.add(PrintNodeSpec::new(self.config.clone())))
-    }
-}
-
-impl RegisteredNodeSpec for Node {
-    fn id(&self) -> &str {
-        ExampleNodeRegistry::id(self)
-    }
-
-    fn add_to_builder(
-        &self,
-        builder: &mut graphcorder::framework::GraphBuilder<Node>,
-    ) -> BuiltGraphNode<Node> {
-        ExampleNodeRegistry::add_to_builder(self, builder)
-    }
+    Producer(ProducerGraphNode),
+    Scale(ScaleGraphNode),
+    Print(PrintGraphNode),
 }
 
 #[tokio::main]

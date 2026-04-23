@@ -2,6 +2,80 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Data, DeriveInput, Fields, LitStr, parse_macro_input};
 
+#[proc_macro_derive(NodeRegistry)]
+pub fn derive_node_registry(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let enum_name = input.ident;
+
+    let variants = match input.data {
+        Data::Enum(data) => data.variants,
+        _ => {
+            return syn::Error::new_spanned(
+                enum_name,
+                "NodeRegistry derive can only be used on enums",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    let from_impls = variants.iter().map(|variant| {
+        let variant_name = &variant.ident;
+        let inner_ty = match &variant.fields {
+            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+                &fields.unnamed.first().expect("field").ty
+            }
+            _ => {
+                return syn::Error::new_spanned(
+                    variant,
+                    "NodeRegistry variants must be single-field tuple variants",
+                )
+                .to_compile_error();
+            }
+        };
+
+        quote! {
+            impl From<#inner_ty> for #enum_name {
+                fn from(node: #inner_ty) -> Self {
+                    Self::#variant_name(node)
+                }
+            }
+        }
+    });
+
+    let id_arms = variants.iter().map(|variant| {
+        let variant_name = &variant.ident;
+        quote! { Self::#variant_name(node) => ::graphcorder::framework::NodeRegistryEntry::id(node), }
+    });
+
+    let add_arms = variants.iter().map(|variant| {
+        let variant_name = &variant.ident;
+        quote! { Self::#variant_name(node) => ::graphcorder::framework::NodeRegistryEntry::add_to_builder(node, builder), }
+    });
+
+    quote! {
+        #( #from_impls )*
+
+        impl ::graphcorder::framework::RegisteredNodeSpec for #enum_name {
+            fn id(&self) -> &str {
+                match self {
+                    #( #id_arms )*
+                }
+            }
+
+            fn add_to_builder(
+                &self,
+                builder: &mut ::graphcorder::framework::GraphBuilder<Self>,
+            ) -> ::graphcorder::framework::BuiltGraphNode<Self> {
+                match self {
+                    #( #add_arms )*
+                }
+            }
+        }
+    }
+    .into()
+}
+
 #[proc_macro_derive(GraphNode, attributes(graph_node))]
 pub fn derive_graph_node(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -13,6 +87,11 @@ pub fn derive_graph_node(input: TokenStream) -> TokenStream {
         ..
     } = input;
     let spec_name = format_ident!("{}Spec", node_name);
+    let node_name_string = node_name.to_string();
+    let graph_node_base = node_name_string
+        .strip_suffix("Node")
+        .unwrap_or(&node_name_string);
+    let graph_node_name = format_ident!("{}GraphNode", graph_node_base);
 
     let node_ctor = match data {
         Data::Struct(data) => match data.fields {
@@ -53,6 +132,18 @@ pub fn derive_graph_node(input: TokenStream) -> TokenStream {
             const KIND: &'static str = #kind;
         }
 
+        #[derive(Clone, Debug, ::facet::Facet)]
+        #node_vis struct #graph_node_name {
+            pub id: String,
+            pub config: #config_ty,
+        }
+
+        impl #graph_node_name {
+            #node_vis fn new(id: String, config: #config_ty) -> Self {
+                Self { id, config }
+            }
+        }
+
         #[derive(Clone, Debug)]
         #node_vis struct #spec_name {
             config: #config_ty,
@@ -66,10 +157,10 @@ pub fn derive_graph_node(input: TokenStream) -> TokenStream {
 
         impl ::graphcorder::framework::GraphNodeSpec for #spec_name {
             type Node = #node_name;
-            type Registry = ::graphcorder::framework::GraphNode<#config_ty>;
+            type Registry = #graph_node_name;
 
             fn export_node(&self, id: String) -> Self::Registry {
-                ::graphcorder::framework::GraphNode::new(id, self.config.clone())
+                #graph_node_name::new(id, self.config.clone())
             }
 
             fn into_parts(self) -> (Self::Node, #config_ty) {
@@ -84,6 +175,25 @@ pub fn derive_graph_node(input: TokenStream) -> TokenStream {
 
             fn from_config(config: Self::Config) -> Self::Spec {
                 #spec_name::new(config)
+            }
+        }
+
+        impl ::graphcorder::framework::NodeRegistryEntry for #graph_node_name {
+            fn id(&self) -> &str {
+                &self.id
+            }
+
+            fn add_to_builder<R>(
+                &self,
+                builder: &mut ::graphcorder::framework::GraphBuilder<R>,
+            ) -> ::graphcorder::framework::BuiltGraphNode<R>
+            where
+                Self: Into<R>,
+                R: ::graphcorder::framework::RegisteredNodeSpec,
+            {
+                ::graphcorder::framework::BuiltGraphNode::from_handle(
+                    builder.add(#spec_name::new(self.config.clone())),
+                )
             }
         }
     };
