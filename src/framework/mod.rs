@@ -7,7 +7,7 @@ pub use crate::graph::{
     OutputPort, OutputPortValue, OutputRuntime, PortCardinality, PortFactory, PortRef,
     PortSchema, PortValue, RegisteredNodeSpec, SingleInputPortHandle, SingleInputPorts,
     SingleOutputPortHandle, SingleOutputPorts, StaticInputPorts, StaticNodeDsl,
-    StaticOutputPorts, StaticPortInfo, Stream,
-    SupportedConstant, constant, has_duplicate_single_connections, has_missing_required_ports,
-    has_port, init, is_single_port, only_port_name,
+    StaticOutputPorts, StaticPortInfo, Stream, PrimitiveConstant, TryFromConstantValue,
+    constant, has_duplicate_single_connections, has_missing_required_ports, has_port, init,
+    is_single_port, only_port_name,
 };

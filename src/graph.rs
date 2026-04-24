@@ -616,30 +616,104 @@ pub struct ConstantTypedSpec<T> {
     value: T,
 }
 
+struct ToConstantValueNode<T>(PhantomData<fn() -> T>);
+
 pub fn constant<T>(value: T) -> ConstantTypedSpec<T>
 where
-    T: SupportedConstant,
+    T: PrimitiveConstant,
 {
     ConstantTypedSpec { value }
 }
 
-pub trait SupportedConstant:
+pub trait PrimitiveConstant:
     PortValue + Default + Into<ConstantValue> + Clone + Send + Sync + 'static
 {
 }
 
-impl<T> SupportedConstant for T where
-    T: PortValue + Default + Into<ConstantValue> + Clone + Send + Sync + 'static
+macro_rules! impl_primitive_constant {
+    ($($ty:ty),* $(,)?) => {
+        $(impl PrimitiveConstant for $ty {})*
+    };
+}
+
+impl_primitive_constant!(f32, f64, usize, u32, u64, i32, i64, bool, String);
+
+pub trait TryFromConstantValue: PortValue + Default {
+    fn try_from_constant_value(value: ConstantValue) -> Option<Self>;
+}
+
+macro_rules! impl_try_from_constant_value {
+    ($($variant:ident => $ty:ty),* $(,)?) => {
+        $(
+            impl TryFromConstantValue for $ty {
+                fn try_from_constant_value(value: ConstantValue) -> Option<Self> {
+                    match value {
+                        ConstantValue::$variant(value) => Some(value),
+                        _ => None,
+                    }
+                }
+            }
+        )*
+    };
+}
+
+impl_try_from_constant_value!(
+    F32 => f32,
+    F64 => f64,
+    Usize => usize,
+    U32 => u32,
+    U64 => u64,
+    I32 => i32,
+    I64 => i64,
+    Bool => bool,
+    String => String,
+);
+
+pub trait ConnectFromConstantSource<T: PrimitiveConstant>: InputPortValue {
+    fn connect_from_constant_source<R: RegisteredNodeSpec>(
+        builder: &mut GraphBuilder<R>,
+        source: OutputPort<T>,
+        target: InputPort<Self>,
+    ) -> Result<(), GraphError>;
+}
+
+impl<T> ConnectFromConstantSource<T> for T
+where
+    T: PrimitiveConstant + InputPortValue<ChannelItem = T>,
 {
+    fn connect_from_constant_source<R: RegisteredNodeSpec>(
+        builder: &mut GraphBuilder<R>,
+        source: OutputPort<T>,
+        target: InputPort<Self>,
+    ) -> Result<(), GraphError> {
+        builder.connect(source, target)
+    }
+}
+
+impl<T> ConnectFromConstantSource<T> for ConstantValue
+where
+    T: PrimitiveConstant,
+{
+    fn connect_from_constant_source<R: RegisteredNodeSpec>(
+        builder: &mut GraphBuilder<R>,
+        source: OutputPort<T>,
+        target: InputPort<Self>,
+    ) -> Result<(), GraphError> {
+        builder.connect_typed_into_constant_value(source, target)
+    }
 }
 
 impl<T> NodeMeta for ConstantTyped<T> {
     const KIND: &'static str = "constant";
 }
 
+impl<T> NodeMeta for ToConstantValueNode<T> {
+    const KIND: &'static str = "__constant_value_bridge";
+}
+
 impl<T> NodeDefinition for ConstantTyped<T>
 where
-    T: SupportedConstant,
+    T: PrimitiveConstant,
 {
     type Config = ConstantConfig<T>;
     type Input = ();
@@ -658,7 +732,7 @@ where
 
 impl<T> GraphNodeSpec for ConstantTypedSpec<T>
 where
-    T: SupportedConstant,
+    T: PrimitiveConstant,
 {
     type Node = ConstantTyped<T>;
     type Registry = ConstantGraphNode;
@@ -675,6 +749,25 @@ where
             ConstantTyped(PhantomData),
             ConstantConfig { value: self.value },
         )
+    }
+}
+
+impl<T> NodeDefinition for ToConstantValueNode<T>
+where
+    T: PrimitiveConstant,
+{
+    type Config = ();
+    type Input = T;
+    type Output = ConstantValue;
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        _config: &Self::Config,
+        output: &mut Self::Output,
+    ) -> Result<(), GraphError> {
+        *output = input.into();
+        Ok(())
     }
 }
 
@@ -1295,6 +1388,15 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
         }
     }
 
+    fn add_internal_node<Node: NodeDefinition + NodeMeta>(
+        &mut self,
+        node: Node,
+        config: Node::Config,
+    ) -> NodeHandle<Node> {
+        let assigned_id = format!("__internal_{}_{}", Node::KIND, self.nodes.len());
+        self.add_node(assigned_id, node, config)
+    }
+
     /// Connect an output port to a compatible input port. The output and input types must
     /// share the same `ChannelItem` — this allows `f32` → `Stream<f32>` and
     /// `Stream<f32, M>` → `Stream<f32, N>` in addition to same-type connections.
@@ -1308,6 +1410,55 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
         self.connect_erased(&source_erased, &target_erased)
     }
 
+    pub fn connect_constant_source<T, In>(
+        &mut self,
+        source: OutputPort<T>,
+        target: InputPort<In>,
+    ) -> Result<(), GraphError>
+    where
+        T: PrimitiveConstant + OutputPortValue<ChannelItem = T>,
+        In: ConnectFromConstantSource<T>,
+    {
+        In::connect_from_constant_source(self, source, target)
+    }
+
+    fn connect_typed_into_constant_value<T>(
+        &mut self,
+        source: OutputPort<T>,
+        target: InputPort<ConstantValue>,
+    ) -> Result<(), GraphError>
+    where
+        T: PrimitiveConstant + OutputPortValue<ChannelItem = T>,
+    {
+        let bridge = self.add_internal_node(ToConstantValueNode::<T>(PhantomData), ());
+        let bridge_input = ErasedInputPort::new::<T>(bridge.single_input_port());
+        let bridge_output = ErasedOutputPort::new::<ConstantValue>(bridge.single_output_port());
+        let source_erased = ErasedOutputPort::new::<T>(source);
+        let target_erased = ErasedInputPort::new::<ConstantValue>(target);
+
+        self.connect_erased_internal(&source_erased, &bridge_input, false)?;
+        self.connect_erased_internal(&bridge_output, &target_erased, false)?;
+
+        let from_node = self
+            .node_specs
+            .get(source.node_id.0)
+            .map(|node| node.id().to_owned())
+            .ok_or_else(|| GraphError::Validation("source node metadata did not exist".into()))?;
+        let to_node = self
+            .node_specs
+            .get(target.node_id.0)
+            .map(|node| node.id().to_owned())
+            .ok_or_else(|| GraphError::Validation("target node metadata did not exist".into()))?;
+        self.edges.push(GraphEdgeSnapshot {
+            from_node,
+            from_port: source.name,
+            to_node,
+            to_port: target.name,
+        });
+
+        Ok(())
+    }
+
     /// Connect two erased ports. Used by `connect_named` and the dynamic graph builder.
     /// Compatibility is checked by `ChannelItem` TypeId rather than exact port type.
     pub fn connect_erased(
@@ -1315,7 +1466,45 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
         source: &ErasedOutputPort,
         target: &ErasedInputPort,
     ) -> Result<(), GraphError> {
+        self.connect_erased_internal(source, target, true)
+    }
+
+    fn connect_erased_internal(
+        &mut self,
+        source: &ErasedOutputPort,
+        target: &ErasedInputPort,
+        record_edge: bool,
+    ) -> Result<(), GraphError> {
         if source.channel_item_type_id != target.channel_item_type_id {
+            if target.channel_item_type_id == TypeId::of::<ConstantValue>() {
+                if source.channel_item_type_id == TypeId::of::<f32>() {
+                    return self.connect_erased_into_constant_value::<f32>(source, target);
+                }
+                if source.channel_item_type_id == TypeId::of::<f64>() {
+                    return self.connect_erased_into_constant_value::<f64>(source, target);
+                }
+                if source.channel_item_type_id == TypeId::of::<usize>() {
+                    return self.connect_erased_into_constant_value::<usize>(source, target);
+                }
+                if source.channel_item_type_id == TypeId::of::<u32>() {
+                    return self.connect_erased_into_constant_value::<u32>(source, target);
+                }
+                if source.channel_item_type_id == TypeId::of::<u64>() {
+                    return self.connect_erased_into_constant_value::<u64>(source, target);
+                }
+                if source.channel_item_type_id == TypeId::of::<i32>() {
+                    return self.connect_erased_into_constant_value::<i32>(source, target);
+                }
+                if source.channel_item_type_id == TypeId::of::<i64>() {
+                    return self.connect_erased_into_constant_value::<i64>(source, target);
+                }
+                if source.channel_item_type_id == TypeId::of::<bool>() {
+                    return self.connect_erased_into_constant_value::<bool>(source, target);
+                }
+                if source.channel_item_type_id == TypeId::of::<String>() {
+                    return self.connect_erased_into_constant_value::<String>(source, target);
+                }
+            }
             return Err(GraphError::Validation(format!(
                 "type mismatch: output port `{}` and input port `{}` carry incompatible value types",
                 source.source_port_name, target.target_port_name
@@ -1372,23 +1561,51 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
             .or_default()
             .push(receiver);
 
-        let from_node = self
-            .node_specs
-            .get(source.source_node_idx)
-            .map(|node| node.id().to_owned())
-            .ok_or_else(|| GraphError::Validation("source node metadata did not exist".into()))?;
-        let to_node = self
-            .node_specs
-            .get(target.target_node_idx)
-            .map(|node| node.id().to_owned())
-            .ok_or_else(|| GraphError::Validation("target node metadata did not exist".into()))?;
-        self.edges.push(GraphEdgeSnapshot {
-            from_node,
-            from_port: source.source_port_name,
-            to_node,
-            to_port: target.target_port_name,
-        });
+        if record_edge {
+            let from_node = self
+                .node_specs
+                .get(source.source_node_idx)
+                .map(|node| node.id().to_owned())
+                .ok_or_else(|| {
+                    GraphError::Validation("source node metadata did not exist".into())
+                })?;
+            let to_node = self
+                .node_specs
+                .get(target.target_node_idx)
+                .map(|node| node.id().to_owned())
+                .ok_or_else(|| {
+                    GraphError::Validation("target node metadata did not exist".into())
+                })?;
+            self.edges.push(GraphEdgeSnapshot {
+                from_node,
+                from_port: source.source_port_name,
+                to_node,
+                to_port: target.target_port_name,
+            });
+        }
         Ok(())
+    }
+
+    fn connect_erased_into_constant_value<T>(
+        &mut self,
+        source: &ErasedOutputPort,
+        target: &ErasedInputPort,
+    ) -> Result<(), GraphError>
+    where
+        T: PrimitiveConstant + OutputPortValue<ChannelItem = T>,
+    {
+        let typed_source = OutputPort::<T> {
+            node_id: NodeId(source.source_node_idx),
+            name: source.source_port_name,
+            _marker: PhantomData,
+        };
+        let constant_target = InputPort::<ConstantValue> {
+            node_id: NodeId(target.target_node_idx),
+            name: target.target_port_name,
+            _marker: PhantomData,
+        };
+
+        self.connect_typed_into_constant_value(typed_source, constant_target)
     }
 
     pub fn connect_named(

@@ -106,6 +106,7 @@ enum Node {
     Scale(ScaleGraphNode),
     Print(PrintGraphNode),
     PrintScalar(PrintScalarGraphNode),
+    PrintDynamic(PrintDynamicGraphNode),
 }
 
 #[derive(Clone, Debug, Facet)]
@@ -132,6 +133,30 @@ impl NodeDefinition for PrintScalarNode {
     }
 }
 
+#[derive(Clone, Debug, Facet)]
+struct PrintDynamicConfig {
+    label: String,
+}
+
+#[derive(GraphNode)]
+struct PrintDynamicNode;
+
+impl NodeDefinition for PrintDynamicNode {
+    type Config = PrintDynamicConfig;
+    type Input = graphcorder::framework::ConstantValue;
+    type Output = ();
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        config: &Self::Config,
+        _output: &mut Self::Output,
+    ) -> Result<(), GraphError> {
+        println!("{}: {:?}", config.label, input);
+        Ok(())
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let instance = graphcorder::init::<Node>();
@@ -149,15 +174,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         node print_2x = PrintNode {
             label: "programmatic result2".into(),
         };
-        node print_scalar = PrintScalarNode {
-            label: "constant result".into(),
+        node print_dynamic = PrintDynamicNode {
+            label: "dynamic constant result".into(),
         };
-        node constant_number = 3.0f32;
+        node constant_number = "test".to_string();
 
         connect producer -> [scale_1x, scale_2x];
         connect scale_1x -> print_1x;
         connect scale_2x -> print_2x;
-        connect constant_number -> print_scalar;
+        connect constant_number -> print_dynamic;
     }?;
 
     let spec = builder.graph_spec();

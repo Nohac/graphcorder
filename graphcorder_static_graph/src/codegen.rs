@@ -102,15 +102,22 @@ fn expand_connect(connect: &ConnectDecl, nodes: &[NodeDecl]) -> Result<TokenStre
 fn expand_named_connect(
     source: &Endpoint,
     target: &Endpoint,
-    _nodes: &[NodeDecl],
+    nodes: &[NodeDecl],
 ) -> Result<TokenStream> {
     let source_expr = source_port_expr(source);
     let target_expr = target_port_expr(target);
     let span = endpoint_span(target);
 
-    Ok(quote_spanned! {span=>
-        builder.connect(#source_expr, #target_expr)?;
-    })
+    let source_node = find_node_decl(nodes, &source.node)?;
+
+    match source_node.kind {
+        NodeDeclKind::Constant(_) => Ok(quote_spanned! {span=>
+            builder.connect_constant_source(#source_expr, #target_expr)?;
+        }),
+        NodeDeclKind::Typed { .. } => Ok(quote_spanned! {span=>
+            builder.connect(#source_expr, #target_expr)?;
+        }),
+    }
 }
 
 fn expand_port_validation(connect: &ConnectDecl, nodes: &[NodeDecl]) -> Result<TokenStream> {
