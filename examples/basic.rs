@@ -177,12 +177,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         node print_dynamic = PrintDynamicNode {
             label: "dynamic constant result".into(),
         };
+        node print_constant_list = PrintNode {
+            label: "constant list result".into(),
+        };
+        node print_dynamic_list = PrintDynamicNode {
+            label: "dynamic constant list result".into(),
+        };
         node constant_number = "test".to_string();
+        node constant_numbers = &[1.0f32, 2.0, 3.0, 4.0];
 
         connect producer -> [scale_1x, scale_2x];
         connect scale_1x -> print_1x;
         connect scale_2x -> print_2x;
         connect constant_number -> print_dynamic;
+        connect constant_numbers -> print_constant_list;
+        connect constant_numbers -> print_dynamic_list;
     }?;
 
     let spec = builder.graph_spec();

@@ -556,14 +556,23 @@ pub trait StaticNodeDsl {
 #[derive(Clone, Debug, Facet)]
 pub enum ConstantValue {
     F32(f32),
+    F32s(Vec<f32>),
     F64(f64),
+    F64s(Vec<f64>),
     Usize(usize),
+    Usizes(Vec<usize>),
     U32(u32),
+    U32s(Vec<u32>),
     U64(u64),
+    U64s(Vec<u64>),
     I32(i32),
+    I32s(Vec<i32>),
     I64(i64),
+    I64s(Vec<i64>),
     Bool(bool),
+    Bools(Vec<bool>),
     String(String),
+    Strings(Vec<String>),
 }
 
 macro_rules! impl_constant_value_from {
@@ -588,6 +597,30 @@ impl_constant_value_from!(
     I64 => i64,
     Bool => bool,
     String => String,
+);
+
+macro_rules! impl_constant_value_from_vec {
+    ($($variant:ident => $ty:ty),* $(,)?) => {
+        $(
+            impl From<Vec<$ty>> for ConstantValue {
+                fn from(value: Vec<$ty>) -> Self {
+                    Self::$variant(value)
+                }
+            }
+        )*
+    };
+}
+
+impl_constant_value_from_vec!(
+    F32s => f32,
+    F64s => f64,
+    Usizes => usize,
+    U32s => u32,
+    U64s => u64,
+    I32s => i32,
+    I64s => i64,
+    Bools => bool,
+    Strings => String,
 );
 
 impl PortValue for ConstantValue {}
@@ -618,25 +651,94 @@ pub struct ConstantTypedSpec<T> {
 
 struct ToConstantValueNode<T>(PhantomData<fn() -> T>);
 
-pub fn constant<T>(value: T) -> ConstantTypedSpec<T>
+pub fn constant<T>(value: T) -> ConstantTypedSpec<T::Value>
 where
-    T: PrimitiveConstant,
+    T: IntoConstantSpec,
 {
-    ConstantTypedSpec { value }
+    value.into_constant_spec()
 }
+
+pub trait ConstantElement:
+    PortValue + Default + Into<ConstantValue> + Clone + Send + Sync + 'static
+{
+}
+
+macro_rules! impl_constant_element {
+    ($($ty:ty),* $(,)?) => {
+        $(impl ConstantElement for $ty {})*
+    };
+}
+
+impl_constant_element!(f32, f64, usize, u32, u64, i32, i64, bool, String);
 
 pub trait PrimitiveConstant:
     PortValue + Default + Into<ConstantValue> + Clone + Send + Sync + 'static
 {
 }
 
-macro_rules! impl_primitive_constant {
-    ($($ty:ty),* $(,)?) => {
-        $(impl PrimitiveConstant for $ty {})*
-    };
+impl<T: ConstantElement> PrimitiveConstant for T {}
+impl<T> PrimitiveConstant for Vec<T>
+where
+    T: ConstantElement,
+    ConstantValue: From<Vec<T>>,
+{
 }
 
-impl_primitive_constant!(f32, f64, usize, u32, u64, i32, i64, bool, String);
+pub trait IntoConstantSpec {
+    type Value: PrimitiveConstant;
+
+    fn into_constant_spec(self) -> ConstantTypedSpec<Self::Value>;
+}
+
+impl<T: PrimitiveConstant> IntoConstantSpec for T {
+    type Value = T;
+
+    fn into_constant_spec(self) -> ConstantTypedSpec<Self::Value> {
+        ConstantTypedSpec { value: self }
+    }
+}
+
+impl<T, const N: usize> IntoConstantSpec for [T; N]
+where
+    T: ConstantElement,
+    ConstantValue: From<Vec<T>>,
+{
+    type Value = Vec<T>;
+
+    fn into_constant_spec(self) -> ConstantTypedSpec<Self::Value> {
+        ConstantTypedSpec {
+            value: Vec::from(self),
+        }
+    }
+}
+
+impl<T, const N: usize> IntoConstantSpec for &[T; N]
+where
+    T: ConstantElement,
+    ConstantValue: From<Vec<T>>,
+{
+    type Value = Vec<T>;
+
+    fn into_constant_spec(self) -> ConstantTypedSpec<Self::Value> {
+        ConstantTypedSpec {
+            value: self.to_vec(),
+        }
+    }
+}
+
+impl<T> IntoConstantSpec for &[T]
+where
+    T: ConstantElement,
+    ConstantValue: From<Vec<T>>,
+{
+    type Value = Vec<T>;
+
+    fn into_constant_spec(self) -> ConstantTypedSpec<Self::Value> {
+        ConstantTypedSpec {
+            value: self.to_vec(),
+        }
+    }
+}
 
 pub trait TryFromConstantValue: PortValue + Default {
     fn try_from_constant_value(value: ConstantValue) -> Option<Self>;
@@ -667,6 +769,33 @@ impl_try_from_constant_value!(
     I64 => i64,
     Bool => bool,
     String => String,
+);
+
+macro_rules! impl_try_from_constant_value_vec {
+    ($($variant:ident => $ty:ty),* $(,)?) => {
+        $(
+            impl TryFromConstantValue for Vec<$ty> {
+                fn try_from_constant_value(value: ConstantValue) -> Option<Self> {
+                    match value {
+                        ConstantValue::$variant(value) => Some(value),
+                        _ => None,
+                    }
+                }
+            }
+        )*
+    };
+}
+
+impl_try_from_constant_value_vec!(
+    F32s => f32,
+    F64s => f64,
+    Usizes => usize,
+    U32s => u32,
+    U64s => u64,
+    I32s => i32,
+    I64s => i64,
+    Bools => bool,
+    Strings => String,
 );
 
 pub trait ConnectFromConstantSource<T: PrimitiveConstant>: InputPortValue {
@@ -785,28 +914,55 @@ impl NodeRegistryEntry for ConstantGraphNode {
             ConstantValue::F32(value) => {
                 BuiltGraphNode::from_handle(builder.add(constant(*value)))
             }
+            ConstantValue::F32s(value) => {
+                BuiltGraphNode::from_handle(builder.add(constant(value.clone())))
+            }
             ConstantValue::F64(value) => {
                 BuiltGraphNode::from_handle(builder.add(constant(*value)))
+            }
+            ConstantValue::F64s(value) => {
+                BuiltGraphNode::from_handle(builder.add(constant(value.clone())))
             }
             ConstantValue::Usize(value) => {
                 BuiltGraphNode::from_handle(builder.add(constant(*value)))
             }
+            ConstantValue::Usizes(value) => {
+                BuiltGraphNode::from_handle(builder.add(constant(value.clone())))
+            }
             ConstantValue::U32(value) => {
                 BuiltGraphNode::from_handle(builder.add(constant(*value)))
+            }
+            ConstantValue::U32s(value) => {
+                BuiltGraphNode::from_handle(builder.add(constant(value.clone())))
             }
             ConstantValue::U64(value) => {
                 BuiltGraphNode::from_handle(builder.add(constant(*value)))
             }
+            ConstantValue::U64s(value) => {
+                BuiltGraphNode::from_handle(builder.add(constant(value.clone())))
+            }
             ConstantValue::I32(value) => {
                 BuiltGraphNode::from_handle(builder.add(constant(*value)))
+            }
+            ConstantValue::I32s(value) => {
+                BuiltGraphNode::from_handle(builder.add(constant(value.clone())))
             }
             ConstantValue::I64(value) => {
                 BuiltGraphNode::from_handle(builder.add(constant(*value)))
             }
+            ConstantValue::I64s(value) => {
+                BuiltGraphNode::from_handle(builder.add(constant(value.clone())))
+            }
             ConstantValue::Bool(value) => {
                 BuiltGraphNode::from_handle(builder.add(constant(*value)))
             }
+            ConstantValue::Bools(value) => {
+                BuiltGraphNode::from_handle(builder.add(constant(value.clone())))
+            }
             ConstantValue::String(value) => {
+                BuiltGraphNode::from_handle(builder.add(constant(value.clone())))
+            }
+            ConstantValue::Strings(value) => {
                 BuiltGraphNode::from_handle(builder.add(constant(value.clone())))
             }
         }
@@ -1477,33 +1633,36 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
     ) -> Result<(), GraphError> {
         if source.channel_item_type_id != target.channel_item_type_id {
             if target.channel_item_type_id == TypeId::of::<ConstantValue>() {
-                if source.channel_item_type_id == TypeId::of::<f32>() {
-                    return self.connect_erased_into_constant_value::<f32>(source, target);
+                macro_rules! try_constant_bridge {
+                    ($($ty:ty),* $(,)?) => {
+                        $(
+                            if source.channel_item_type_id == TypeId::of::<$ty>() {
+                                return self.connect_erased_into_constant_value::<$ty>(source, target);
+                            }
+                        )*
+                    };
                 }
-                if source.channel_item_type_id == TypeId::of::<f64>() {
-                    return self.connect_erased_into_constant_value::<f64>(source, target);
-                }
-                if source.channel_item_type_id == TypeId::of::<usize>() {
-                    return self.connect_erased_into_constant_value::<usize>(source, target);
-                }
-                if source.channel_item_type_id == TypeId::of::<u32>() {
-                    return self.connect_erased_into_constant_value::<u32>(source, target);
-                }
-                if source.channel_item_type_id == TypeId::of::<u64>() {
-                    return self.connect_erased_into_constant_value::<u64>(source, target);
-                }
-                if source.channel_item_type_id == TypeId::of::<i32>() {
-                    return self.connect_erased_into_constant_value::<i32>(source, target);
-                }
-                if source.channel_item_type_id == TypeId::of::<i64>() {
-                    return self.connect_erased_into_constant_value::<i64>(source, target);
-                }
-                if source.channel_item_type_id == TypeId::of::<bool>() {
-                    return self.connect_erased_into_constant_value::<bool>(source, target);
-                }
-                if source.channel_item_type_id == TypeId::of::<String>() {
-                    return self.connect_erased_into_constant_value::<String>(source, target);
-                }
+
+                try_constant_bridge!(
+                    f32,
+                    Vec<f32>,
+                    f64,
+                    Vec<f64>,
+                    usize,
+                    Vec<usize>,
+                    u32,
+                    Vec<u32>,
+                    u64,
+                    Vec<u64>,
+                    i32,
+                    Vec<i32>,
+                    i64,
+                    Vec<i64>,
+                    bool,
+                    Vec<bool>,
+                    String,
+                    Vec<String>,
+                );
             }
             return Err(GraphError::Validation(format!(
                 "type mismatch: output port `{}` and input port `{}` carry incompatible value types",
