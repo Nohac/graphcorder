@@ -171,6 +171,36 @@ impl NodeDefinition for BoundedPrintNode {
     }
 }
 
+/// Emits a single scalar f32 value — used to demonstrate scalar → Stream<f32> connection.
+#[derive(Clone, Debug, Facet)]
+struct SingleValueConfig {
+    value: f32,
+}
+
+#[derive(Clone, Debug, Facet, NodeOutputs)]
+struct SingleValueOutput {
+    values: f32,
+}
+
+#[derive(GraphNode)]
+struct SingleValueNode;
+
+impl NodeDefinition for SingleValueNode {
+    type Config = SingleValueConfig;
+    type Input = ();
+    type Output = SingleValueOutput;
+
+    async fn run(
+        &self,
+        _input: (),
+        config: &Self::Config,
+        output: &mut Self::Output,
+    ) -> Result<(), GraphError> {
+        output.values = config.value;
+        Ok(())
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Debug, Facet, NodeRegistry)]
 enum Node {
@@ -179,6 +209,7 @@ enum Node {
     Scale(ScaleGraphNode),
     Print(PrintGraphNode),
     BoundedPrint(BoundedPrintGraphNode),
+    SingleValue(SingleValueGraphNode),
 }
 
 #[tokio::main]
@@ -216,6 +247,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             registry: Node;
             node source = BoundedCounterNode { count: 6 };
             node sink   = BoundedPrintNode { label: "bounded".into() };
+            connect source -> sink;
+        }?;
+        builder.build().run().await?;
+    }
+
+    // Stream<f32> output -> Stream<f32, 4> input: different N values are compatible.
+    println!("\n=== cross-N: Stream<f32> -> Stream<f32, 4> ===");
+    {
+        let builder = static_graph! {
+            registry: Node;
+            node source = CounterNode { count: 3 };
+            node sink   = BoundedPrintNode { label: "cross-N".into() };
+            connect source -> sink;
+        }?;
+        builder.build().run().await?;
+    }
+
+    // f32 scalar output -> Stream<f32> input: consumer sees a one-element stream.
+    println!("\n=== scalar f32 -> Stream<f32> ===");
+    {
+        let builder = static_graph! {
+            registry: Node;
+            node source = SingleValueNode { value: 42.0 };
+            node sink   = PrintNode { label: "from-scalar".into() };
             connect source -> sink;
         }?;
         builder.build().run().await?;

@@ -274,6 +274,9 @@ unsafe impl<T: Clone + Send + 'static, const N: usize> Send for Stream<T, N> {}
 
 pub trait InputPortValue: Send + Sized + 'static {
     type EdgeValue: Send + 'static;
+    /// The item type carried by the underlying mpsc channel. For scalar ports this is
+    /// the value type itself; for `Stream<T, N>` it is `T`.
+    type ChannelItem: Clone + Send + 'static;
 
     fn schema(name: &'static str) -> PortSchema;
     fn receive(
@@ -284,6 +287,7 @@ pub trait InputPortValue: Send + Sized + 'static {
 
 impl<T: PortValue> InputPortValue for T {
     type EdgeValue = T;
+    type ChannelItem = T;
 
     fn schema(name: &'static str) -> PortSchema {
         PortSchema {
@@ -300,6 +304,7 @@ impl<T: PortValue> InputPortValue for T {
 
 impl<T: PortValue, const N: usize> InputPortValue for Stream<T, N> {
     type EdgeValue = Stream<T, N>;
+    type ChannelItem = T;
 
     fn schema(name: &'static str) -> PortSchema {
         PortSchema {
@@ -533,46 +538,83 @@ pub const fn const_str_eq(left: &str, right: &str) -> bool {
     true
 }
 
-pub struct ErasedInputPort<R> {
-    type_id: TypeId,
-    inner: Box<dyn Any + Send>,
-    connect: fn(&mut GraphBuilder<R>, &dyn Any, &dyn Any) -> Result<(), GraphError>,
+/// Type-erased input port. Carries the channel-item TypeId for compatibility matching.
+pub struct ErasedInputPort {
+    channel_item_type_id: TypeId,
+    target_node_idx: usize,
+    target_port_name: &'static str,
 }
 
-impl<R: RegisteredNodeSpec> ErasedInputPort<R> {
-    pub fn new<T: OutputPortValue + InputPortValue>(port: InputPort<T>) -> Self {
+impl ErasedInputPort {
+    pub fn new<T: InputPortValue>(port: InputPort<T>) -> Self {
         Self {
-            type_id: TypeId::of::<T>(),
-            inner: Box::new(port),
-            connect: |builder, source, target| {
-                let source = source
-                    .downcast_ref::<OutputPort<T>>()
-                    .ok_or_else(|| GraphError::Validation("output port type mismatch".into()))?;
-                let target = target
-                    .downcast_ref::<InputPort<T>>()
-                    .ok_or_else(|| GraphError::Validation("input port type mismatch".into()))?;
-                builder.connect(*source, *target)
-            },
+            channel_item_type_id: TypeId::of::<T::ChannelItem>(),
+            target_node_idx: port.node_id.0,
+            target_port_name: port.name,
         }
     }
 }
 
+type AttachFn = fn(
+    &mut [NodeRegistration],
+    usize,
+    &'static str,
+    usize,
+) -> Result<Box<dyn Any + Send>, GraphError>;
+
+/// Type-erased output port. Carries the channel-item TypeId and a monomorphised
+/// function pointer that wires the mpsc sender into the source node's output runtime.
 pub struct ErasedOutputPort {
-    type_id: TypeId,
-    inner: Box<dyn Any + Send>,
+    channel_item_type_id: TypeId,
+    source_node_idx: usize,
+    source_port_name: &'static str,
+    capacity_override: Option<usize>,
+    attach: AttachFn,
 }
 
 impl ErasedOutputPort {
-    pub fn new<T: Send + 'static>(port: OutputPort<T>) -> Self {
+    pub fn new<T: OutputPortValue>(port: OutputPort<T>) -> Self {
         Self {
-            type_id: TypeId::of::<T>(),
-            inner: Box::new(port),
+            channel_item_type_id: TypeId::of::<T::ChannelItem>(),
+            source_node_idx: port.node_id.0,
+            source_port_name: port.name,
+            capacity_override: T::channel_capacity(),
+            attach: attach_fn_for::<T::ChannelItem>,
         }
     }
 }
 
+fn attach_fn_for<T: Clone + Send + 'static>(
+    nodes: &mut [NodeRegistration],
+    node_idx: usize,
+    port_name: &'static str,
+    capacity: usize,
+) -> Result<Box<dyn Any + Send>, GraphError> {
+    let node = nodes
+        .get_mut(node_idx)
+        .ok_or_else(|| GraphError::Validation("source node did not exist".into()))?;
+
+    if let Some(existing) = node.outputs.get_mut(port_name) {
+        let senders = existing
+            .downcast_mut::<Vec<mpsc::Sender<T>>>()
+            .ok_or_else(|| {
+                GraphError::Validation(format!(
+                    "output port `{port_name}` on node `{}` had an unexpected runtime type",
+                    node.name
+                ))
+            })?;
+        let (sender, receiver) = mpsc::channel(capacity);
+        senders.push(sender);
+        return Ok(Box::new(receiver));
+    }
+
+    let (sender, receiver) = mpsc::channel::<T>(capacity);
+    node.outputs.insert(port_name, Box::new(vec![sender]));
+    Ok(Box::new(receiver))
+}
+
 pub trait ErasedInputPorts {
-    fn input_port<R: RegisteredNodeSpec>(&self, name: &str) -> Option<ErasedInputPort<R>>;
+    fn input_port(&self, name: &str) -> Option<ErasedInputPort>;
 }
 
 pub trait ErasedOutputPorts {
@@ -580,7 +622,7 @@ pub trait ErasedOutputPorts {
 }
 
 trait ErasedBuiltNode<R: RegisteredNodeSpec>: Send {
-    fn input_port(&self, name: &str) -> Option<ErasedInputPort<R>>;
+    fn input_port(&self, name: &str) -> Option<ErasedInputPort>;
     fn output_port(&self, name: &str) -> Option<ErasedOutputPort>;
 }
 
@@ -595,8 +637,8 @@ where
     I: ErasedInputPorts + Send,
     O: ErasedOutputPorts + Send,
 {
-    fn input_port(&self, name: &str) -> Option<ErasedInputPort<R>> {
-        self.input.input_port::<R>(name)
+    fn input_port(&self, name: &str) -> Option<ErasedInputPort> {
+        self.input.input_port(name)
     }
 
     fn output_port(&self, name: &str) -> Option<ErasedOutputPort> {
@@ -639,19 +681,14 @@ impl<R: RegisteredNodeSpec> BuiltGraphNode<R> {
             .inner
             .output_port(from_port)
             .ok_or_else(|| GraphError::Validation(format!("missing output port `{from_port}`")))?;
-        let target = target
+        let target_port = target
             .inner
             .input_port(to_port)
             .ok_or_else(|| GraphError::Validation(format!("missing input port `{to_port}`")))?;
 
-        if source.type_id != target.type_id {
-            return Err(GraphError::Validation(format!(
-                "type mismatch connecting `{from_port}` to `{to_port}`"
-            )));
-        }
-
-        (target.connect)(builder, source.inner.as_ref(), target.inner.as_ref())
+        builder.connect_erased(&source, &target_port)
     }
+
 }
 
 pub trait NodeRegistryEntry: Clone + Send + Sync + Facet<'static> + 'static {
@@ -955,31 +992,58 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
         }
     }
 
-    pub fn connect<T: OutputPortValue + InputPortValue>(
+    /// Connect an output port to a compatible input port. The output and input types must
+    /// share the same `ChannelItem` — this allows `f32` → `Stream<f32>` and
+    /// `Stream<f32, M>` → `Stream<f32, N>` in addition to same-type connections.
+    pub fn connect<Out: OutputPortValue, In: InputPortValue<ChannelItem = Out::ChannelItem>>(
         &mut self,
-        source: OutputPort<T>,
-        target: InputPort<T>,
+        source: OutputPort<Out>,
+        target: InputPort<In>,
     ) -> Result<(), GraphError> {
-        let source_node_id = source.node_id.0;
-        let source_port_name = source.name;
-        let receiver = self.attach_output::<T>(source)?;
+        let source_erased = ErasedOutputPort::new::<Out>(source);
+        let target_erased = ErasedInputPort::new::<In>(target);
+        self.connect_erased(&source_erased, &target_erased)
+    }
+
+    /// Connect two erased ports. Used by `connect_named` and the dynamic graph builder.
+    /// Compatibility is checked by `ChannelItem` TypeId rather than exact port type.
+    pub fn connect_erased(
+        &mut self,
+        source: &ErasedOutputPort,
+        target: &ErasedInputPort,
+    ) -> Result<(), GraphError> {
+        if source.channel_item_type_id != target.channel_item_type_id {
+            return Err(GraphError::Validation(format!(
+                "type mismatch: output port `{}` and input port `{}` carry incompatible value types",
+                source.source_port_name, target.target_port_name
+            )));
+        }
+
+        let cap = source.capacity_override.unwrap_or(self.channel_capacity);
+        let receiver = (source.attach)(
+            &mut self.nodes,
+            source.source_node_idx,
+            source.source_port_name,
+            cap,
+        )?;
+
         let target_node = self
             .nodes
-            .get_mut(target.node_id.0)
+            .get_mut(target.target_node_idx)
             .ok_or_else(|| GraphError::Validation("target node did not exist".into()))?;
 
         let cardinality = target_node
             .input_schemas
-            .get(target.name)
+            .get(target.target_port_name)
             .ok_or(GraphError::MissingInputPort {
                 node: target_node.name,
-                port: target.name,
+                port: target.target_port_name,
             })?
             .cardinality;
 
         let existing_connection_count = target_node
             .inputs
-            .get(target.name)
+            .get(target.target_port_name)
             .map(|connections| connections.len())
             .unwrap_or(0);
 
@@ -987,13 +1051,13 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
             PortCardinality::Single if existing_connection_count > 0 => {
                 return Err(GraphError::PortAlreadyConnected {
                     node: target_node.name,
-                    port: target.name,
+                    port: target.target_port_name,
                 });
             }
             PortCardinality::Fixed(limit) if existing_connection_count >= limit => {
                 return Err(GraphError::Validation(format!(
                     "input port `{}` on node `{}` accepts at most {limit} connections",
-                    target.name, target_node.name
+                    target.target_port_name, target_node.name
                 )));
             }
             _ => {}
@@ -1001,24 +1065,25 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
 
         target_node
             .inputs
-            .entry(target.name)
+            .entry(target.target_port_name)
             .or_default()
-            .push(Box::new(receiver));
+            .push(receiver);
+
         let from_node = self
             .node_specs
-            .get(source_node_id)
+            .get(source.source_node_idx)
             .map(|node| node.id().to_owned())
             .ok_or_else(|| GraphError::Validation("source node metadata did not exist".into()))?;
         let to_node = self
             .node_specs
-            .get(target.node_id.0)
+            .get(target.target_node_idx)
             .map(|node| node.id().to_owned())
             .ok_or_else(|| GraphError::Validation("target node metadata did not exist".into()))?;
         self.edges.push(GraphEdgeSnapshot {
             from_node,
-            from_port: source_port_name,
+            from_port: source.source_port_name,
             to_node,
-            to_port: target.name,
+            to_port: target.target_port_name,
         });
         Ok(())
     }
@@ -1066,41 +1131,6 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
         GraphSpec { nodes, edges }
     }
 
-    /// Creates a channel for the given output port and returns the receiver end.
-    /// The sender is stored in the source node's OutputRuntime for use during execution.
-    /// On subsequent calls for the same port (fan-out), adds another channel.
-    fn attach_output<T: OutputPortValue>(
-        &mut self,
-        source: OutputPort<T>,
-    ) -> Result<mpsc::Receiver<T::ChannelItem>, GraphError> {
-        let source_node = self
-            .nodes
-            .get_mut(source.node_id.0)
-            .ok_or_else(|| GraphError::Validation("source node did not exist".into()))?;
-
-        let cap = T::channel_capacity().unwrap_or(self.channel_capacity);
-
-        if let Some(existing) = source_node.outputs.get_mut(source.name) {
-            let senders = existing
-                .downcast_mut::<Vec<mpsc::Sender<T::ChannelItem>>>()
-                .ok_or_else(|| {
-                    GraphError::Validation(format!(
-                        "output port `{}` on node `{}` had an unexpected runtime type",
-                        source.name, source_node.name
-                    ))
-                })?;
-
-            let (sender, receiver) = mpsc::channel(cap);
-            senders.push(sender);
-            return Ok(receiver);
-        }
-
-        let (sender, receiver) = mpsc::channel(cap);
-        source_node
-            .outputs
-            .insert(source.name, Box::new(vec![sender]));
-        Ok(receiver)
-    }
 }
 
 impl<R: RegisteredNodeSpec> Default for GraphBuilder<R> {
@@ -1178,7 +1208,7 @@ impl NodeInputs for () {
 }
 
 impl ErasedInputPorts for () {
-    fn input_port<R: RegisteredNodeSpec>(&self, _name: &str) -> Option<ErasedInputPort<R>> {
+    fn input_port(&self, _name: &str) -> Option<ErasedInputPort> {
         None
     }
 }

@@ -378,10 +378,10 @@ fn derive_ports(input: TokenStream, kind: PortKind) -> TokenStream {
                 }
 
                 impl ::graphcorder::framework::ErasedInputPorts for #ports_name {
-                    fn input_port<R: ::graphcorder::framework::RegisteredNodeSpec>(
+                    fn input_port(
                         &self,
                         name: &str,
-                    ) -> Option<::graphcorder::framework::ErasedInputPort<R>> {
+                    ) -> Option<::graphcorder::framework::ErasedInputPort> {
                         match name {
                             #( #input_match_arms )*
                             _ => None,
