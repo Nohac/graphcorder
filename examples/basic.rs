@@ -101,9 +101,35 @@ impl NodeDefinition for PrintNode {
 #[repr(C)]
 #[derive(Clone, Debug, Facet, NodeRegistry)]
 enum Node {
+    Constant(graphcorder::framework::ConstantGraphNode),
     Producer(ProducerGraphNode),
     Scale(ScaleGraphNode),
     Print(PrintGraphNode),
+    PrintScalar(PrintScalarGraphNode),
+}
+
+#[derive(Clone, Debug, Facet)]
+struct PrintScalarConfig {
+    label: String,
+}
+
+#[derive(GraphNode)]
+struct PrintScalarNode;
+
+impl NodeDefinition for PrintScalarNode {
+    type Config = PrintScalarConfig;
+    type Input = f32;
+    type Output = ();
+
+    async fn run(
+        &self,
+        input: Self::Input,
+        config: &Self::Config,
+        _output: &mut Self::Output,
+    ) -> Result<(), GraphError> {
+        println!("{}: {}", config.label, input);
+        Ok(())
+    }
 }
 
 #[tokio::main]
@@ -123,10 +149,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         node print_2x = PrintNode {
             label: "programmatic result2".into(),
         };
+        node print_scalar = PrintScalarNode {
+            label: "constant result".into(),
+        };
+        node constant_number = 3.0f32;
 
         connect producer -> [scale_1x, scale_2x];
         connect scale_1x -> print_1x;
         connect scale_2x -> print_2x;
+        connect constant_number -> print_scalar;
     }?;
 
     let spec = builder.graph_spec();

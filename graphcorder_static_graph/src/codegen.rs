@@ -1,10 +1,12 @@
 use std::collections::BTreeSet;
 
 use proc_macro2::TokenStream;
-use quote::{format_ident, quote, quote_spanned};
-use syn::{Error, Result, Type};
+use quote::{quote, quote_spanned};
+use syn::{Error, Result};
 
-use crate::types::{ConnectDecl, Endpoint, EndpointSet, GraphItem, NodeDecl, StaticGraphInput};
+use crate::types::{
+    ConnectDecl, Endpoint, EndpointSet, GraphItem, NodeDecl, NodeDeclKind, StaticGraphInput,
+};
 
 pub fn expand(input: StaticGraphInput) -> Result<TokenStream> {
     let registry = input.registry;
@@ -32,19 +34,20 @@ pub fn expand(input: StaticGraphInput) -> Result<TokenStream> {
 
     let node_defs = node_decls.iter().map(|node| {
         let name = &node.name;
-        let built_name = built_ident(name);
-        let node_ty = &node.node_ty;
-        let fields = &node.fields;
-        quote! {
-            let #name = builder.add(
-                <#node_ty as ::graphcorder::framework::StaticNodeDsl>::from_config(
-                    {
-                        type GraphcorderConfig = <#node_ty as ::graphcorder::framework::StaticNodeDsl>::Config;
-                        GraphcorderConfig { #fields }
-                    }
-                )
-            );
-            let #built_name = ::graphcorder::framework::BuiltGraphNode::new(#name.input, #name.output);
+        match &node.kind {
+            NodeDeclKind::Typed { node_ty, fields } => quote! {
+                let #name = builder.add(
+                    <#node_ty as ::graphcorder::framework::StaticNodeDsl>::from_config(
+                        {
+                            type GraphcorderConfig = <#node_ty as ::graphcorder::framework::StaticNodeDsl>::Config;
+                            GraphcorderConfig { #fields }
+                        }
+                    )
+                );
+            },
+            NodeDeclKind::Constant(expr) => quote! {
+                let #name = builder.add(::graphcorder::framework::constant(#expr));
+            },
         }
     });
 
@@ -99,33 +102,14 @@ fn expand_connect(connect: &ConnectDecl, nodes: &[NodeDecl]) -> Result<TokenStre
 fn expand_named_connect(
     source: &Endpoint,
     target: &Endpoint,
-    nodes: &[NodeDecl],
+    _nodes: &[NodeDecl],
 ) -> Result<TokenStream> {
-    if let (Some(source_port), Some(target_port)) = (&source.port, &target.port) {
-        let source_node = &source.node;
-        let target_node = &target.node;
-        return Ok(quote! {
-            builder.connect(
-                #source_node.output.#source_port,
-                #target_node.input.#target_port,
-            )?;
-        });
-    }
+    let source_expr = source_port_expr(source);
+    let target_expr = target_port_expr(target);
+    let span = endpoint_span(target);
 
-    let source_built = built_ident(&source.node);
-    let target_built = built_ident(&target.node);
-    let source_node_ty = find_node_ty(nodes, &source.node)?;
-    let target_node_ty = find_node_ty(nodes, &target.node)?;
-    let source_port = source_port_expr(source, source_node_ty)?;
-    let target_port = target_port_expr(target, target_node_ty)?;
-
-    Ok(quote! {
-        builder.connect_named(
-            &#source_built,
-            #source_port,
-            &#target_built,
-            #target_port,
-        )?;
+    Ok(quote_spanned! {span=>
+        builder.connect(#source_expr, #target_expr)?;
     })
 }
 
@@ -150,23 +134,9 @@ fn expand_endpoint_validation(
     nodes: &[NodeDecl],
     is_source: bool,
 ) -> Result<TokenStream> {
-    let node_ty = find_node_ty(nodes, &endpoint.node)?;
-
-    let (ports_expr, role) = if is_source {
-        (
-            quote! {
-                <<<#node_ty as ::graphcorder::framework::StaticNodeDsl>::Node as ::graphcorder::framework::NodeDefinition>::Output as ::graphcorder::framework::StaticOutputPorts>::PORTS
-            },
-            "output",
-        )
-    } else {
-        (
-            quote! {
-                <<<#node_ty as ::graphcorder::framework::StaticNodeDsl>::Node as ::graphcorder::framework::NodeDefinition>::Input as ::graphcorder::framework::StaticInputPorts>::PORTS
-            },
-            "input",
-        )
-    };
+    let node = find_node_decl(nodes, &endpoint.node)?;
+    let ports_expr = ports_expr(node, is_source);
+    let role = if is_source { "output" } else { "input" };
 
     if let Some(port) = &endpoint.port {
         let port_name = port.to_string();
@@ -201,19 +171,18 @@ fn expand_required_input_validation(
     connect_decls: &[ConnectDecl],
     nodes: &[NodeDecl],
 ) -> Result<TokenStream> {
-    let node_ty = &node.node_ty;
     let connected_ports = connect_decls
         .iter()
         .flat_map(|connect| endpoints(&connect.target).iter().cloned())
         .filter(|target| target.node == node.name)
         .map(|target| resolved_target_port_expr(&target, nodes))
         .collect::<Result<Vec<_>>>()?;
+    let ports_expr = ports_expr(node, false);
 
     let span = node.name.span();
     Ok(quote_spanned! {span=>
         const _: () = {
-            const PORTS: &[::graphcorder::framework::StaticPortInfo] =
-                <<<#node_ty as ::graphcorder::framework::StaticNodeDsl>::Node as ::graphcorder::framework::NodeDefinition>::Input as ::graphcorder::framework::StaticInputPorts>::PORTS;
+            const PORTS: &[::graphcorder::framework::StaticPortInfo] = #ports_expr;
             const CONNECTED: &[&str] = &[ #( #connected_ports ),* ];
             if ::graphcorder::framework::has_duplicate_single_connections(PORTS, CONNECTED) {
                 panic!("duplicate connection to single input port");
@@ -225,42 +194,34 @@ fn expand_required_input_validation(
     })
 }
 
-fn source_port_expr(endpoint: &Endpoint, node_ty: &Type) -> Result<TokenStream> {
+fn source_port_expr(endpoint: &Endpoint) -> TokenStream {
+    let node = &endpoint.node;
     if let Some(port) = &endpoint.port {
-        let port_name = port.to_string();
-        Ok(quote! { #port_name })
+        quote! { #node.output.#port }
     } else {
-        Ok(quote! {
-            ::graphcorder::framework::only_port_name(
-                <<<#node_ty as ::graphcorder::framework::StaticNodeDsl>::Node as ::graphcorder::framework::NodeDefinition>::Output as ::graphcorder::framework::StaticOutputPorts>::PORTS
-            ).expect("implicit source port requires exactly one output port")
-        })
+        quote! { #node.single_output_port() }
     }
 }
 
-fn target_port_expr(endpoint: &Endpoint, node_ty: &Type) -> Result<TokenStream> {
+fn target_port_expr(endpoint: &Endpoint) -> TokenStream {
+    let node = &endpoint.node;
     if let Some(port) = &endpoint.port {
-        let port_name = port.to_string();
-        Ok(quote! { #port_name })
+        quote! { #node.input.#port }
     } else {
-        Ok(quote! {
-            ::graphcorder::framework::only_port_name(
-                <<<#node_ty as ::graphcorder::framework::StaticNodeDsl>::Node as ::graphcorder::framework::NodeDefinition>::Input as ::graphcorder::framework::StaticInputPorts>::PORTS
-            ).expect("implicit target port requires exactly one input port")
-        })
+        quote! { #node.single_input_port() }
     }
 }
 
 fn resolved_target_port_expr(endpoint: &Endpoint, nodes: &[NodeDecl]) -> Result<TokenStream> {
-    let node_ty = find_node_ty(nodes, &endpoint.node)?;
+    let node = find_node_decl(nodes, &endpoint.node)?;
     if let Some(port) = &endpoint.port {
         let port_name = port.to_string();
         Ok(quote! { #port_name })
     } else {
+        let ports_expr = ports_expr(node, false);
         Ok(quote! {
-            ::graphcorder::framework::only_port_name(
-                <<<#node_ty as ::graphcorder::framework::StaticNodeDsl>::Node as ::graphcorder::framework::NodeDefinition>::Input as ::graphcorder::framework::StaticInputPorts>::PORTS
-            ).expect("implicit target port requires exactly one input port")
+            ::graphcorder::framework::only_port_name(#ports_expr)
+                .expect("implicit target port requires exactly one input port")
         })
     }
 }
@@ -311,12 +272,34 @@ fn validate(node_decls: &[NodeDecl], connect_decls: &[ConnectDecl]) -> Result<()
     }
 }
 
-fn find_node_ty<'a>(nodes: &'a [NodeDecl], name: &syn::Ident) -> Result<&'a Type> {
+fn find_node_decl<'a>(nodes: &'a [NodeDecl], name: &syn::Ident) -> Result<&'a NodeDecl> {
     nodes
         .iter()
         .find(|node| node.name == *name)
-        .map(|node| &node.node_ty)
         .ok_or_else(|| Error::new_spanned(name, "unknown node"))
+}
+
+fn ports_expr(node: &NodeDecl, is_source: bool) -> TokenStream {
+    match &node.kind {
+        NodeDeclKind::Typed { node_ty, .. } => {
+            if is_source {
+                quote! {
+                    <<<#node_ty as ::graphcorder::framework::StaticNodeDsl>::Node as ::graphcorder::framework::NodeDefinition>::Output as ::graphcorder::framework::StaticOutputPorts>::PORTS
+                }
+            } else {
+                quote! {
+                    <<<#node_ty as ::graphcorder::framework::StaticNodeDsl>::Node as ::graphcorder::framework::NodeDefinition>::Input as ::graphcorder::framework::StaticInputPorts>::PORTS
+                }
+            }
+        }
+        NodeDeclKind::Constant(_) => {
+            if is_source {
+                quote! { <::graphcorder::framework::ConstantValue as ::graphcorder::framework::StaticOutputPorts>::PORTS }
+            } else {
+                quote! { <() as ::graphcorder::framework::StaticInputPorts>::PORTS }
+            }
+        }
+    }
 }
 
 fn endpoints(set: &EndpointSet) -> &[Endpoint] {
@@ -324,6 +307,14 @@ fn endpoints(set: &EndpointSet) -> &[Endpoint] {
         EndpointSet::One(endpoint) => std::slice::from_ref(endpoint),
         EndpointSet::Many(endpoints) => endpoints.as_slice(),
     }
+}
+
+fn endpoint_span(endpoint: &Endpoint) -> proc_macro2::Span {
+    endpoint
+        .port
+        .as_ref()
+        .map(|port| port.span())
+        .unwrap_or_else(|| endpoint.node.span())
 }
 
 fn validate_endpoint_exists(
@@ -341,10 +332,6 @@ fn validate_endpoint_exists(
             ),
         );
     }
-}
-
-fn built_ident(name: &syn::Ident) -> syn::Ident {
-    format_ident!("__graphcorder_{}_built", name)
 }
 
 fn push_error(errors: &mut Option<Error>, error: Error) {

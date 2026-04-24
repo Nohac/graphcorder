@@ -349,6 +349,25 @@ fn derive_ports(input: TokenStream, kind: PortKind) -> TokenStream {
                 quote! { #lit => Some(::graphcorder::framework::ErasedInputPort::new(self.#name)), }
             });
 
+            let single_input_impl = if fields.len() == 1 {
+                let field = fields.first().expect("single field");
+                let name = field.ident.as_ref().expect("named field");
+                let ty = &field.ty;
+                quote! {
+                    impl ::graphcorder::framework::SingleInputPortHandle for #ports_name {
+                        type Port = #ty;
+
+                        fn single_input_port(
+                            &self,
+                        ) -> ::graphcorder::framework::InputPort<Self::Port> {
+                            self.#name
+                        }
+                    }
+                }
+            } else {
+                quote! {}
+            };
+
             quote! {
                 #[derive(Clone, Copy)]
                 pub struct #ports_name {
@@ -394,6 +413,8 @@ fn derive_ports(input: TokenStream, kind: PortKind) -> TokenStream {
                         #( #static_port_items, )*
                     ];
                 }
+
+                #single_input_impl
             }
         }
         PortKind::Output => {
@@ -420,6 +441,25 @@ fn derive_ports(input: TokenStream, kind: PortKind) -> TokenStream {
                 let lit = name.to_string();
                 quote! { #lit => Some(::graphcorder::framework::ErasedOutputPort::new(self.#name)), }
             });
+
+            let single_output_impl = if fields.len() == 1 {
+                let field = fields.first().expect("single field");
+                let name = field.ident.as_ref().expect("named field");
+                let ty = &field.ty;
+                quote! {
+                    impl ::graphcorder::framework::SingleOutputPortHandle for #ports_name {
+                        type Port = #ty;
+
+                        fn single_output_port(
+                            &self,
+                        ) -> ::graphcorder::framework::OutputPort<Self::Port> {
+                            self.#name
+                        }
+                    }
+                }
+            } else {
+                quote! {}
+            };
 
             quote! {
                 #[derive(Clone, Copy)]
@@ -474,6 +514,8 @@ fn derive_ports(input: TokenStream, kind: PortKind) -> TokenStream {
                         #( #static_port_items, )*
                     ];
                 }
+
+                #single_output_impl
             }
         }
     };

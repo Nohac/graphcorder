@@ -173,6 +173,28 @@ pub struct GraphEdgeSnapshot {
     pub to_port: &'static str,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SingleInputPorts<T: InputPortValue> {
+    pub value: InputPort<T>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SingleOutputPorts<T: OutputPortValue> {
+    pub value: OutputPort<T>,
+}
+
+pub trait SingleInputPortHandle {
+    type Port: InputPortValue;
+
+    fn single_input_port(&self) -> InputPort<Self::Port>;
+}
+
+pub trait SingleOutputPortHandle {
+    type Port: OutputPortValue;
+
+    fn single_output_port(&self) -> OutputPort<Self::Port>;
+}
+
 pub trait NodeInputs: Send + Sized + 'static {
     type Ports;
 
@@ -218,6 +240,49 @@ impl_port_value!(f32, f64, usize, u32, u64, i32, i64, bool, String);
 impl<T: PortValue> PortValue for Vec<T> {}
 
 impl<T: PortValue, const N: usize> PortValue for [T; N] {}
+
+impl<T: InputPortValue> NodeInputs for T {
+    type Ports = SingleInputPorts<T>;
+
+    fn ports(factory: &PortFactory) -> Self::Ports {
+        SingleInputPorts {
+            value: factory.input("value"),
+        }
+    }
+
+    fn schema() -> Vec<PortSchema> {
+        vec![T::schema("value")]
+    }
+
+    async fn receive(runtime: &mut InputRuntime) -> Result<Self, GraphError> {
+        T::receive(runtime, "value").await
+    }
+}
+
+impl<T: InputPortValue> ErasedInputPorts for SingleInputPorts<T> {
+    fn input_port(&self, name: &str) -> Option<ErasedInputPort> {
+        match name {
+            "value" => Some(ErasedInputPort::new(self.value)),
+            _ => None,
+        }
+    }
+}
+
+impl<T: InputPortValue> StaticInputPorts for T {
+    const PORTS: &'static [StaticPortInfo] = &[StaticPortInfo {
+        name: "value",
+        cardinality: PortCardinality::Single,
+        required: true,
+    }];
+}
+
+impl<T: InputPortValue> SingleInputPortHandle for SingleInputPorts<T> {
+    type Port = T;
+
+    fn single_input_port(&self) -> InputPort<Self::Port> {
+        self.value
+    }
+}
 
 /// A streaming port value: producers push values with [`send`](Stream::send) during
 /// `run()`; consumers receive them one at a time via [`next`](Stream::next).
@@ -407,6 +472,53 @@ impl<T: PortValue + Default, const N: usize> OutputPortValue for Stream<T, N> {
     }
 }
 
+impl<T: OutputPortValue> NodeOutputs for T {
+    type Ports = SingleOutputPorts<T>;
+
+    fn ports(factory: &PortFactory) -> Self::Ports {
+        SingleOutputPorts {
+            value: factory.output("value"),
+        }
+    }
+
+    fn schema() -> Vec<PortSchema> {
+        vec![T::schema("value")]
+    }
+
+    fn initialize(runtime: &mut OutputRuntime) -> Self {
+        T::initialize_field(runtime, "value")
+    }
+
+    async fn finalize(self, runtime: &mut OutputRuntime) -> Result<(), GraphError> {
+        T::finalize_field(self, runtime, "value").await
+    }
+}
+
+impl<T: OutputPortValue> ErasedOutputPorts for SingleOutputPorts<T> {
+    fn output_port(&self, name: &str) -> Option<ErasedOutputPort> {
+        match name {
+            "value" => Some(ErasedOutputPort::new(self.value)),
+            _ => None,
+        }
+    }
+}
+
+impl<T: OutputPortValue> StaticOutputPorts for T {
+    const PORTS: &'static [StaticPortInfo] = &[StaticPortInfo {
+        name: "value",
+        cardinality: PortCardinality::Single,
+        required: true,
+    }];
+}
+
+impl<T: OutputPortValue> SingleOutputPortHandle for SingleOutputPorts<T> {
+    type Port = T;
+
+    fn single_output_port(&self) -> OutputPort<Self::Port> {
+        self.value
+    }
+}
+
 pub trait NodeDefinition: Send + Sync + 'static {
     type Config: Clone + Send + Sync + Facet<'static> + 'static;
     type Input: NodeInputs;
@@ -438,6 +550,174 @@ pub trait StaticNodeDsl {
     type Spec: GraphNodeSpec<Node = Self::Node>;
 
     fn from_config(config: Self::Config) -> Self::Spec;
+}
+
+#[repr(C)]
+#[derive(Clone, Debug, Facet)]
+pub enum ConstantValue {
+    F32(f32),
+    F64(f64),
+    Usize(usize),
+    U32(u32),
+    U64(u64),
+    I32(i32),
+    I64(i64),
+    Bool(bool),
+    String(String),
+}
+
+macro_rules! impl_constant_value_from {
+    ($($variant:ident => $ty:ty),* $(,)?) => {
+        $(
+            impl From<$ty> for ConstantValue {
+                fn from(value: $ty) -> Self {
+                    Self::$variant(value)
+                }
+            }
+        )*
+    };
+}
+
+impl_constant_value_from!(
+    F32 => f32,
+    F64 => f64,
+    Usize => usize,
+    U32 => u32,
+    U64 => u64,
+    I32 => i32,
+    I64 => i64,
+    Bool => bool,
+    String => String,
+);
+
+impl PortValue for ConstantValue {}
+
+impl Default for ConstantValue {
+    fn default() -> Self {
+        Self::F32(0.0)
+    }
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct ConstantGraphNode {
+    pub id: String,
+    pub value: ConstantValue,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct ConstantConfig<T> {
+    pub value: T,
+}
+
+pub struct ConstantTyped<T>(PhantomData<fn() -> T>);
+
+#[derive(Clone, Debug)]
+pub struct ConstantTypedSpec<T> {
+    value: T,
+}
+
+pub fn constant<T>(value: T) -> ConstantTypedSpec<T>
+where
+    T: SupportedConstant,
+{
+    ConstantTypedSpec { value }
+}
+
+pub trait SupportedConstant:
+    PortValue + Default + Into<ConstantValue> + Clone + Send + Sync + 'static
+{
+}
+
+impl<T> SupportedConstant for T where
+    T: PortValue + Default + Into<ConstantValue> + Clone + Send + Sync + 'static
+{
+}
+
+impl<T> NodeMeta for ConstantTyped<T> {
+    const KIND: &'static str = "constant";
+}
+
+impl<T> NodeDefinition for ConstantTyped<T>
+where
+    T: SupportedConstant,
+{
+    type Config = ConstantConfig<T>;
+    type Input = ();
+    type Output = T;
+
+    async fn run(
+        &self,
+        _input: Self::Input,
+        config: &Self::Config,
+        output: &mut Self::Output,
+    ) -> Result<(), GraphError> {
+        *output = config.value.clone();
+        Ok(())
+    }
+}
+
+impl<T> GraphNodeSpec for ConstantTypedSpec<T>
+where
+    T: SupportedConstant,
+{
+    type Node = ConstantTyped<T>;
+    type Registry = ConstantGraphNode;
+
+    fn export_node(&self, id: String) -> Self::Registry {
+        ConstantGraphNode {
+            id,
+            value: self.value.clone().into(),
+        }
+    }
+
+    fn into_parts(self) -> (Self::Node, <Self::Node as NodeDefinition>::Config) {
+        (
+            ConstantTyped(PhantomData),
+            ConstantConfig { value: self.value },
+        )
+    }
+}
+
+impl NodeRegistryEntry for ConstantGraphNode {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn add_to_builder<R>(&self, builder: &mut GraphBuilder<R>) -> BuiltGraphNode<R>
+    where
+        Self: Into<R>,
+        R: RegisteredNodeSpec,
+    {
+        match &self.value {
+            ConstantValue::F32(value) => {
+                BuiltGraphNode::from_handle(builder.add(constant(*value)))
+            }
+            ConstantValue::F64(value) => {
+                BuiltGraphNode::from_handle(builder.add(constant(*value)))
+            }
+            ConstantValue::Usize(value) => {
+                BuiltGraphNode::from_handle(builder.add(constant(*value)))
+            }
+            ConstantValue::U32(value) => {
+                BuiltGraphNode::from_handle(builder.add(constant(*value)))
+            }
+            ConstantValue::U64(value) => {
+                BuiltGraphNode::from_handle(builder.add(constant(*value)))
+            }
+            ConstantValue::I32(value) => {
+                BuiltGraphNode::from_handle(builder.add(constant(*value)))
+            }
+            ConstantValue::I64(value) => {
+                BuiltGraphNode::from_handle(builder.add(constant(*value)))
+            }
+            ConstantValue::Bool(value) => {
+                BuiltGraphNode::from_handle(builder.add(constant(*value)))
+            }
+            ConstantValue::String(value) => {
+                BuiltGraphNode::from_handle(builder.add(constant(value.clone())))
+            }
+        }
+    }
 }
 
 pub const fn has_port(ports: &[StaticPortInfo], name: &str) -> bool {
@@ -688,7 +968,6 @@ impl<R: RegisteredNodeSpec> BuiltGraphNode<R> {
 
         builder.connect_erased(&source, &target_port)
     }
-
 }
 
 pub trait NodeRegistryEntry: Clone + Send + Sync + Facet<'static> + 'static {
@@ -708,6 +987,30 @@ pub struct NodeHandle<Node: NodeDefinition> {
     pub id: String,
     pub input: <Node::Input as NodeInputs>::Ports,
     pub output: <Node::Output as NodeOutputs>::Ports,
+}
+
+impl<Node> NodeHandle<Node>
+where
+    Node: NodeDefinition,
+    <Node::Input as NodeInputs>::Ports: SingleInputPortHandle,
+{
+    pub fn single_input_port(
+        &self,
+    ) -> InputPort<<<Node::Input as NodeInputs>::Ports as SingleInputPortHandle>::Port> {
+        self.input.single_input_port()
+    }
+}
+
+impl<Node> NodeHandle<Node>
+where
+    Node: NodeDefinition,
+    <Node::Output as NodeOutputs>::Ports: SingleOutputPortHandle,
+{
+    pub fn single_output_port(
+        &self,
+    ) -> OutputPort<<<Node::Output as NodeOutputs>::Ports as SingleOutputPortHandle>::Port> {
+        self.output.single_output_port()
+    }
 }
 
 pub struct InputRuntime {
@@ -1130,7 +1433,6 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
 
         GraphSpec { nodes, edges }
     }
-
 }
 
 impl<R: RegisteredNodeSpec> Default for GraphBuilder<R> {

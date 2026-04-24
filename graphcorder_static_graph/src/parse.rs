@@ -1,9 +1,11 @@
 use syn::braced;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
-use syn::{FieldValue, Ident, Result, Token, Type};
+use syn::{Expr, FieldValue, Ident, Result, Token, Type};
 
-use crate::types::{ConnectDecl, Endpoint, EndpointSet, GraphItem, NodeDecl, StaticGraphInput};
+use crate::types::{
+    ConnectDecl, Endpoint, EndpointSet, GraphItem, NodeDecl, NodeDeclKind, StaticGraphInput,
+};
 
 mod kw {
     syn::custom_keyword!(registry);
@@ -38,16 +40,17 @@ impl Parse for NodeDecl {
         input.parse::<kw::node>()?;
         let name = input.parse::<Ident>()?;
         input.parse::<Token![=]>()?;
-        let node_ty = input.parse()?;
-        let content;
-        braced!(content in input);
-        let fields = Punctuated::<FieldValue, Token![,]>::parse_terminated(&content)?;
+        let kind = if is_typed_node_decl(input) {
+            let node_ty = input.parse::<Type>()?;
+            let content;
+            braced!(content in input);
+            let fields = Punctuated::<FieldValue, Token![,]>::parse_terminated(&content)?;
+            NodeDeclKind::Typed { node_ty, fields }
+        } else {
+            NodeDeclKind::Constant(input.parse::<Expr>()?)
+        };
         input.parse::<Token![;]>()?;
-        Ok(Self {
-            name,
-            node_ty,
-            fields,
-        })
+        Ok(Self { name, kind })
     }
 }
 
@@ -88,4 +91,9 @@ impl Parse for Endpoint {
         };
         Ok(Self { node, port })
     }
+}
+
+fn is_typed_node_decl(input: ParseStream<'_>) -> bool {
+    let fork = input.fork();
+    fork.parse::<Type>().is_ok() && fork.peek(syn::token::Brace)
 }

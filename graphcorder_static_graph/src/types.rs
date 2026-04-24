@@ -1,4 +1,4 @@
-use syn::{FieldValue, Ident, Token, Type, punctuated::Punctuated};
+use syn::{Expr, FieldValue, Ident, Token, Type, punctuated::Punctuated};
 
 pub struct StaticGraphInput {
     pub registry: Type,
@@ -12,8 +12,15 @@ pub enum GraphItem {
 
 pub struct NodeDecl {
     pub name: Ident,
-    pub node_ty: Type,
-    pub fields: Punctuated<FieldValue, Token![,]>,
+    pub kind: NodeDeclKind,
+}
+
+pub enum NodeDeclKind {
+    Typed {
+        node_ty: Type,
+        fields: Punctuated<FieldValue, Token![,]>,
+    },
+    Constant(Expr),
 }
 
 pub struct ConnectDecl {
