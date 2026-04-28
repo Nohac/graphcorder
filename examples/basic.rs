@@ -1,8 +1,7 @@
 use facet::Facet;
-use facet_pretty::FacetPretty;
 use graphcorder::{
     GraphNode, NodeInputs, NodeOutputs, NodeRegistry,
-    framework::{GraphError, GraphSpec, NodeDefinition},
+    framework::{GraphError, NodeDefinition},
     static_graph,
 };
 
@@ -163,49 +162,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let builder = static_graph! {
         registry: Node;
 
-        node producer = ProducerNode {
+        let producer = ProducerNode {
             value: vec![6.0, 12.0, 18.0, 24.0],
         };
-        node scale_1x = ScaleNode { factor: 1.5 };
-        node scale_2x = ScaleNode { factor: 3.0 };
-        node print_1x = PrintNode {
+        let scale_1x = ScaleNode { factor: 1.5 };
+        let scale_2x = ScaleNode { factor: 3.0 };
+        let print_1x = PrintNode {
             label: "programmatic result".into(),
         };
-        node print_2x = PrintNode {
+        let print_2x = PrintNode {
             label: "programmatic result2".into(),
         };
-        node print_dynamic = PrintDynamicNode {
-            label: "dynamic constant result".into(),
-        };
-        node print_constant_list = PrintNode {
-            label: "constant list result".into(),
-        };
-        node print_dynamic_list = PrintDynamicNode {
-            label: "dynamic constant list result".into(),
-        };
-        node constant_number = "test".to_string();
-        node constant_numbers = &[1.0f32, 2.0, 3.0, 4.0];
+        // let print_dynamic = PrintDynamicNode {
+        //     label: "dynamic constant result".into(),
+        // };
+        // let print_constant_list = PrintNode {
+        //     label: "constant list result".into(),
+        // };
+        // let print_dynamic_list = PrintDynamicNode {
+        //     label: "dynamic constant list result".into(),
+        // };
+        // let constant_number = "test".to_string();
+        // let constant_numbers = &[1.0f32, 2.0, 3.0, 4.0];
 
-        connect producer -> [scale_1x, scale_2x];
-        connect scale_1x -> print_1x;
-        connect scale_2x -> print_2x;
-        connect constant_number -> print_dynamic;
-        connect constant_numbers -> print_constant_list;
-        connect constant_numbers -> print_dynamic_list;
+        producer -> scale_1x -> print_1x;
+        producer -> scale_2x -> print_2x;
+        // constant_number -> print_dynamic;
+        // constant_numbers -> [print_constant_list, print_dynamic_list];
     }?;
 
-    let spec = builder.graph_spec();
-    println!("{}", spec.pretty());
-    println!("{}", facet_json::to_string_pretty(&spec)?);
-    println!(
-        "{}",
-        facet_json::to_string_pretty(&instance.graph_schema())?
-    );
+    // let spec = builder.graph_spec();
+    // println!("{}", spec.pretty());
+    // println!("{}", facet_json::to_string_pretty(&spec)?);
+    instance.graph_schema();
+    // println!(
+    //     "{}",
+    //     facet_json::to_string_pretty()?
+    // );
 
+    println!("========= programmatic output");
     builder.build().run().await?;
 
-    let round_trip: GraphSpec<Node> = facet_json::from_str(&facet_json::to_string(&spec)?)?;
-    instance.build_graph_from_spec(round_trip)?.run().await?;
+    // println!("========= roundtrip output");
+    // let round_trip: GraphSpec<Node> = facet_json::from_str(&facet_json::to_string(&spec)?)?;
+    // instance.build_graph_from_spec(round_trip)?.run().await?;
 
     Ok(())
 }

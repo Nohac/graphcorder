@@ -7,7 +7,7 @@ pub struct StaticGraphInput {
 
 pub enum GraphItem {
     Node(NodeDecl),
-    Connect(ConnectDecl),
+    Edge(EdgeStmt),
 }
 
 pub struct NodeDecl {
@@ -23,9 +23,8 @@ pub enum NodeDeclKind {
     Constant(Expr),
 }
 
-pub struct ConnectDecl {
-    pub source: EndpointSet,
-    pub target: EndpointSet,
+pub struct EdgeStmt {
+    pub chain: Vec<EndpointSet>,
 }
 
 pub enum EndpointSet {

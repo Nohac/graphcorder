@@ -5,7 +5,7 @@ use quote::{quote, quote_spanned};
 use syn::{Error, Result};
 
 use crate::types::{
-    ConnectDecl, Endpoint, EndpointSet, GraphItem, NodeDecl, NodeDeclKind, StaticGraphInput,
+    EdgeStmt, Endpoint, EndpointSet, GraphItem, NodeDecl, NodeDeclKind, StaticGraphInput,
 };
 
 pub fn expand(input: StaticGraphInput) -> Result<TokenStream> {
@@ -17,7 +17,7 @@ pub fn expand(input: StaticGraphInput) -> Result<TokenStream> {
     for item in input.items {
         match item {
             GraphItem::Node(node) => node_decls.push(node),
-            GraphItem::Connect(connect) => connect_decls.push(connect),
+            GraphItem::Edge(edge) => connect_decls.push(edge),
         }
     }
 
@@ -53,7 +53,7 @@ pub fn expand(input: StaticGraphInput) -> Result<TokenStream> {
 
     let connect_defs = connect_decls
         .iter()
-        .map(|connect| expand_connect(connect, &node_decls))
+        .map(|connect| expand_edge_stmt(connect, &node_decls))
         .collect::<Result<Vec<_>>>()?;
 
     Ok(quote! {{
@@ -70,9 +70,23 @@ pub fn expand(input: StaticGraphInput) -> Result<TokenStream> {
     }})
 }
 
-fn expand_connect(connect: &ConnectDecl, nodes: &[NodeDecl]) -> Result<TokenStream> {
-    let sources = endpoints(&connect.source);
-    let targets = endpoints(&connect.target);
+fn expand_edge_stmt(edge: &EdgeStmt, nodes: &[NodeDecl]) -> Result<TokenStream> {
+    let mut statements = Vec::new();
+
+    for pair in edge.chain.windows(2) {
+        statements.push(expand_connect_pair(&pair[0], &pair[1], nodes)?);
+    }
+
+    Ok(quote! { #( #statements )* })
+}
+
+fn expand_connect_pair(
+    source_set: &EndpointSet,
+    target_set: &EndpointSet,
+    nodes: &[NodeDecl],
+) -> Result<TokenStream> {
+    let sources = endpoints(source_set);
+    let targets = endpoints(target_set);
 
     match (sources.len(), targets.len()) {
         (1, 1) => expand_named_connect(&sources[0], &targets[0], nodes),
@@ -94,7 +108,7 @@ fn expand_connect(connect: &ConnectDecl, nodes: &[NodeDecl]) -> Result<TokenStre
         }
         _ => Err(Error::new_spanned(
             targets[0].node.clone(),
-            "many-to-many connect syntax is not supported",
+            "many-to-many edge syntax is not supported",
         )),
     }
 }
@@ -120,20 +134,24 @@ fn expand_named_connect(
     }
 }
 
-fn expand_port_validation(connect: &ConnectDecl, nodes: &[NodeDecl]) -> Result<TokenStream> {
-    let source_validations = endpoints(&connect.source)
-        .iter()
-        .map(|source| expand_endpoint_validation(source, nodes, true))
-        .collect::<Result<Vec<_>>>()?;
-    let target_validations = endpoints(&connect.target)
-        .iter()
-        .map(|target| expand_endpoint_validation(target, nodes, false))
-        .collect::<Result<Vec<_>>>()?;
+fn expand_port_validation(edge: &EdgeStmt, nodes: &[NodeDecl]) -> Result<TokenStream> {
+    let mut validations = Vec::new();
+    for pair in edge.chain.windows(2) {
+        validations.extend(
+            endpoints(&pair[0])
+                .iter()
+                .map(|source| expand_endpoint_validation(source, nodes, true))
+                .collect::<Result<Vec<_>>>()?,
+        );
+        validations.extend(
+            endpoints(&pair[1])
+                .iter()
+                .map(|target| expand_endpoint_validation(target, nodes, false))
+                .collect::<Result<Vec<_>>>()?,
+        );
+    }
 
-    Ok(quote! {
-        #( #source_validations )*
-        #( #target_validations )*
-    })
+    Ok(quote! { #( #validations )* })
 }
 
 fn expand_endpoint_validation(
@@ -175,12 +193,12 @@ fn expand_endpoint_validation(
 
 fn expand_required_input_validation(
     node: &NodeDecl,
-    connect_decls: &[ConnectDecl],
+    connect_decls: &[EdgeStmt],
     nodes: &[NodeDecl],
 ) -> Result<TokenStream> {
     let connected_ports = connect_decls
         .iter()
-        .flat_map(|connect| endpoints(&connect.target).iter().cloned())
+        .flat_map(edge_targets)
         .filter(|target| target.node == node.name)
         .map(|target| resolved_target_port_expr(&target, nodes))
         .collect::<Result<Vec<_>>>()?;
@@ -233,7 +251,7 @@ fn resolved_target_port_expr(endpoint: &Endpoint, nodes: &[NodeDecl]) -> Result<
     }
 }
 
-fn validate(node_decls: &[NodeDecl], connect_decls: &[ConnectDecl]) -> Result<()> {
+fn validate(node_decls: &[NodeDecl], connect_decls: &[EdgeStmt]) -> Result<()> {
     let mut errors: Option<Error> = None;
     let mut node_names = BTreeSet::new();
 
@@ -255,18 +273,20 @@ fn validate(node_decls: &[NodeDecl], connect_decls: &[ConnectDecl]) -> Result<()
     let mut seen_targets = BTreeSet::new();
 
     for connect in connect_decls {
-        for source in endpoints(&connect.source) {
-            validate_endpoint_exists(&mut errors, &declared_nodes, source);
-        }
-        for target in endpoints(&connect.target) {
-            validate_endpoint_exists(&mut errors, &declared_nodes, target);
-            if let Some(port) = &target.port {
-                let key = (target.node.to_string(), port.to_string());
-                if !seen_targets.insert(key) {
-                    push_error(
-                        &mut errors,
-                        Error::new_spanned(port, "duplicate connection to target port"),
-                    );
+        for pair in connect.chain.windows(2) {
+            for source in endpoints(&pair[0]) {
+                validate_endpoint_exists(&mut errors, &declared_nodes, source);
+            }
+            for target in endpoints(&pair[1]) {
+                validate_endpoint_exists(&mut errors, &declared_nodes, target);
+                if let Some(port) = &target.port {
+                    let key = (target.node.to_string(), port.to_string());
+                    if !seen_targets.insert(key) {
+                        push_error(
+                            &mut errors,
+                            Error::new_spanned(port, "duplicate connection to target port"),
+                        );
+                    }
                 }
             }
         }
@@ -314,6 +334,12 @@ fn endpoints(set: &EndpointSet) -> &[Endpoint] {
         EndpointSet::One(endpoint) => std::slice::from_ref(endpoint),
         EndpointSet::Many(endpoints) => endpoints.as_slice(),
     }
+}
+
+fn edge_targets(edge: &EdgeStmt) -> impl Iterator<Item = Endpoint> + '_ {
+    edge.chain
+        .windows(2)
+        .flat_map(|pair| endpoints(&pair[1]).iter().cloned())
 }
 
 fn endpoint_span(endpoint: &Endpoint) -> proc_macro2::Span {

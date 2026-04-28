@@ -218,12 +218,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let builder = static_graph! {
             registry: Node;
-            node source = CounterNode { count: 5 };
-            node scale  = ScaleNode { factor: 10.0 };
-            node a = PrintNode { label: "A".into() };
-            node b = PrintNode { label: "B".into() };
-            connect source -> [scale, b];
-            connect scale -> a;
+            let source = CounterNode { count: 5 };
+            let scale  = ScaleNode { factor: 10.0 };
+            let a = PrintNode { label: "A".into() };
+            let b = PrintNode { label: "B".into() };
+            source -> [scale, b];
+            scale -> a;
         }?;
         builder.build().run().await?;
     }
@@ -232,11 +232,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let builder = static_graph! {
             registry: Node;
-            node source = CounterNode { count: 4 };
-            node scale  = ScaleNode { factor: 10.0 };
-            node sink   = PrintNode { label: "scaled".into() };
-            connect source -> scale;
-            connect scale  -> sink;
+            let source = CounterNode { count: 4 };
+            let scale  = ScaleNode { factor: 10.0 };
+            let sink   = PrintNode { label: "scaled".into() };
+            source -> scale -> sink;
         }?;
         builder.build().run().await?;
     }
@@ -245,9 +244,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let builder = static_graph! {
             registry: Node;
-            node source = BoundedCounterNode { count: 6 };
-            node sink   = BoundedPrintNode { label: "bounded".into() };
-            connect source -> sink;
+            let source = BoundedCounterNode { count: 6 };
+            let sink   = BoundedPrintNode { label: "bounded".into() };
+            source -> sink;
         }?;
         builder.build().run().await?;
     }
@@ -257,9 +256,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let builder = static_graph! {
             registry: Node;
-            node source = CounterNode { count: 3 };
-            node sink   = BoundedPrintNode { label: "cross-N".into() };
-            connect source -> sink;
+            let source = CounterNode { count: 3 };
+            let sink   = BoundedPrintNode { label: "cross-N".into() };
+            source -> sink;
         }?;
         builder.build().run().await?;
     }
@@ -269,9 +268,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let builder = static_graph! {
             registry: Node;
-            node source = SingleValueNode { value: 42.0 };
-            node sink   = PrintNode { label: "from-scalar".into() };
-            connect source -> sink;
+            let source = SingleValueNode { value: 42.0 };
+            let sink   = PrintNode { label: "from-scalar".into() };
+            source -> sink;
         }?;
         builder.build().run().await?;
     }

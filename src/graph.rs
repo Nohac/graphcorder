@@ -556,23 +556,32 @@ pub trait StaticNodeDsl {
 #[derive(Clone, Debug, Facet)]
 pub enum ConstantValue {
     F32(f32),
-    F32s(Vec<f32>),
     F64(f64),
-    F64s(Vec<f64>),
     Usize(usize),
-    Usizes(Vec<usize>),
     U32(u32),
-    U32s(Vec<u32>),
     U64(u64),
-    U64s(Vec<u64>),
     I32(i32),
-    I32s(Vec<i32>),
     I64(i64),
-    I64s(Vec<i64>),
     Bool(bool),
-    Bools(Vec<bool>),
     String(String),
-    Strings(Vec<String>),
+    List(#[facet(recursive_type)] Vec<ConstantValue>),
+}
+
+#[repr(C)]
+#[derive(Clone, Debug, Eq, PartialEq, Facet)]
+pub enum ConstantKind {
+    F32,
+    F64,
+    Usize,
+    U32,
+    U64,
+    I32,
+    I64,
+    Bool,
+    String,
+    List(#[facet(recursive_type)] Box<ConstantKind>),
+    MixedList,
+    EmptyList,
 }
 
 macro_rules! impl_constant_value_from {
@@ -599,29 +608,48 @@ impl_constant_value_from!(
     String => String,
 );
 
-macro_rules! impl_constant_value_from_vec {
-    ($($variant:ident => $ty:ty),* $(,)?) => {
+macro_rules! impl_constant_value_from_list {
+    ($($ty:ty),* $(,)?) => {
         $(
             impl From<Vec<$ty>> for ConstantValue {
                 fn from(value: Vec<$ty>) -> Self {
-                    Self::$variant(value)
+                    Self::List(value.into_iter().map(ConstantValue::from).collect())
                 }
             }
         )*
     };
 }
 
-impl_constant_value_from_vec!(
-    F32s => f32,
-    F64s => f64,
-    Usizes => usize,
-    U32s => u32,
-    U64s => u64,
-    I32s => i32,
-    I64s => i64,
-    Bools => bool,
-    Strings => String,
-);
+impl_constant_value_from_list!(f32, f64, usize, u32, u64, i32, i64, bool, String);
+
+impl ConstantValue {
+    pub fn kind(&self) -> ConstantKind {
+        match self {
+            Self::F32(_) => ConstantKind::F32,
+            Self::F64(_) => ConstantKind::F64,
+            Self::Usize(_) => ConstantKind::Usize,
+            Self::U32(_) => ConstantKind::U32,
+            Self::U64(_) => ConstantKind::U64,
+            Self::I32(_) => ConstantKind::I32,
+            Self::I64(_) => ConstantKind::I64,
+            Self::Bool(_) => ConstantKind::Bool,
+            Self::String(_) => ConstantKind::String,
+            Self::List(values) => {
+                let mut kinds = values.iter().map(Self::kind);
+                match kinds.next() {
+                    None => ConstantKind::EmptyList,
+                    Some(first) => {
+                        if kinds.all(|kind| kind == first) {
+                            ConstantKind::List(Box::new(first))
+                        } else {
+                            ConstantKind::MixedList
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 impl PortValue for ConstantValue {}
 
@@ -677,6 +705,7 @@ pub trait PrimitiveConstant:
 }
 
 impl<T: ConstantElement> PrimitiveConstant for T {}
+impl PrimitiveConstant for ConstantValue {}
 impl<T> PrimitiveConstant for Vec<T>
 where
     T: ConstantElement,
@@ -771,13 +800,25 @@ impl_try_from_constant_value!(
     String => String,
 );
 
-macro_rules! impl_try_from_constant_value_vec {
+impl TryFromConstantValue for ConstantValue {
+    fn try_from_constant_value(value: ConstantValue) -> Option<Self> {
+        Some(value)
+    }
+}
+
+macro_rules! impl_try_from_constant_value_list {
     ($($variant:ident => $ty:ty),* $(,)?) => {
         $(
             impl TryFromConstantValue for Vec<$ty> {
                 fn try_from_constant_value(value: ConstantValue) -> Option<Self> {
                     match value {
-                        ConstantValue::$variant(value) => Some(value),
+                        ConstantValue::List(values) => values
+                            .into_iter()
+                            .map(|value| match value {
+                                ConstantValue::$variant(value) => Some(value),
+                                _ => None,
+                            })
+                            .collect(),
                         _ => None,
                     }
                 }
@@ -786,16 +827,16 @@ macro_rules! impl_try_from_constant_value_vec {
     };
 }
 
-impl_try_from_constant_value_vec!(
-    F32s => f32,
-    F64s => f64,
-    Usizes => usize,
-    U32s => u32,
-    U64s => u64,
-    I32s => i32,
-    I64s => i64,
-    Bools => bool,
-    Strings => String,
+impl_try_from_constant_value_list!(
+    F32 => f32,
+    F64 => f64,
+    Usize => usize,
+    U32 => u32,
+    U64 => u64,
+    I32 => i32,
+    I64 => i64,
+    Bool => bool,
+    String => String,
 );
 
 pub trait ConnectFromConstantSource<T: PrimitiveConstant>: InputPortValue {
@@ -806,13 +847,32 @@ pub trait ConnectFromConstantSource<T: PrimitiveConstant>: InputPortValue {
     ) -> Result<(), GraphError>;
 }
 
-impl<T> ConnectFromConstantSource<T> for T
+macro_rules! impl_direct_constant_source {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl ConnectFromConstantSource<$ty> for $ty {
+                fn connect_from_constant_source<R: RegisteredNodeSpec>(
+                    builder: &mut GraphBuilder<R>,
+                    source: OutputPort<$ty>,
+                    target: InputPort<Self>,
+                ) -> Result<(), GraphError> {
+                    builder.connect(source, target)
+                }
+            }
+        )*
+    };
+}
+
+impl_direct_constant_source!(f32, f64, usize, u32, u64, i32, i64, bool, String);
+
+impl<T> ConnectFromConstantSource<Vec<T>> for Vec<T>
 where
-    T: PrimitiveConstant + InputPortValue<ChannelItem = T>,
+    T: ConstantElement,
+    ConstantValue: From<Vec<T>>,
 {
     fn connect_from_constant_source<R: RegisteredNodeSpec>(
         builder: &mut GraphBuilder<R>,
-        source: OutputPort<T>,
+        source: OutputPort<Vec<T>>,
         target: InputPort<Self>,
     ) -> Result<(), GraphError> {
         builder.connect(source, target)
@@ -911,60 +971,84 @@ impl NodeRegistryEntry for ConstantGraphNode {
         R: RegisteredNodeSpec,
     {
         match &self.value {
-            ConstantValue::F32(value) => {
-                BuiltGraphNode::from_handle(builder.add(constant(*value)))
-            }
-            ConstantValue::F32s(value) => {
-                BuiltGraphNode::from_handle(builder.add(constant(value.clone())))
-            }
-            ConstantValue::F64(value) => {
-                BuiltGraphNode::from_handle(builder.add(constant(*value)))
-            }
-            ConstantValue::F64s(value) => {
-                BuiltGraphNode::from_handle(builder.add(constant(value.clone())))
-            }
+            ConstantValue::F32(value) => BuiltGraphNode::from_handle(builder.add(constant(*value))),
+            ConstantValue::F64(value) => BuiltGraphNode::from_handle(builder.add(constant(*value))),
             ConstantValue::Usize(value) => {
                 BuiltGraphNode::from_handle(builder.add(constant(*value)))
             }
-            ConstantValue::Usizes(value) => {
-                BuiltGraphNode::from_handle(builder.add(constant(value.clone())))
-            }
-            ConstantValue::U32(value) => {
-                BuiltGraphNode::from_handle(builder.add(constant(*value)))
-            }
-            ConstantValue::U32s(value) => {
-                BuiltGraphNode::from_handle(builder.add(constant(value.clone())))
-            }
-            ConstantValue::U64(value) => {
-                BuiltGraphNode::from_handle(builder.add(constant(*value)))
-            }
-            ConstantValue::U64s(value) => {
-                BuiltGraphNode::from_handle(builder.add(constant(value.clone())))
-            }
-            ConstantValue::I32(value) => {
-                BuiltGraphNode::from_handle(builder.add(constant(*value)))
-            }
-            ConstantValue::I32s(value) => {
-                BuiltGraphNode::from_handle(builder.add(constant(value.clone())))
-            }
-            ConstantValue::I64(value) => {
-                BuiltGraphNode::from_handle(builder.add(constant(*value)))
-            }
-            ConstantValue::I64s(value) => {
-                BuiltGraphNode::from_handle(builder.add(constant(value.clone())))
-            }
+            ConstantValue::U32(value) => BuiltGraphNode::from_handle(builder.add(constant(*value))),
+            ConstantValue::U64(value) => BuiltGraphNode::from_handle(builder.add(constant(*value))),
+            ConstantValue::I32(value) => BuiltGraphNode::from_handle(builder.add(constant(*value))),
+            ConstantValue::I64(value) => BuiltGraphNode::from_handle(builder.add(constant(*value))),
             ConstantValue::Bool(value) => {
                 BuiltGraphNode::from_handle(builder.add(constant(*value)))
-            }
-            ConstantValue::Bools(value) => {
-                BuiltGraphNode::from_handle(builder.add(constant(value.clone())))
             }
             ConstantValue::String(value) => {
                 BuiltGraphNode::from_handle(builder.add(constant(value.clone())))
             }
-            ConstantValue::Strings(value) => {
-                BuiltGraphNode::from_handle(builder.add(constant(value.clone())))
-            }
+            ConstantValue::List(_) => match self.value.kind() {
+                ConstantKind::List(kind) => match *kind {
+                    ConstantKind::F32 => BuiltGraphNode::from_handle(
+                        builder.add(constant(
+                            Vec::<f32>::try_from_constant_value(self.value.clone())
+                                .expect("constant list kind should match f32 values"),
+                        )),
+                    ),
+                    ConstantKind::F64 => BuiltGraphNode::from_handle(
+                        builder.add(constant(
+                            Vec::<f64>::try_from_constant_value(self.value.clone())
+                                .expect("constant list kind should match f64 values"),
+                        )),
+                    ),
+                    ConstantKind::Usize => BuiltGraphNode::from_handle(
+                        builder.add(constant(
+                            Vec::<usize>::try_from_constant_value(self.value.clone())
+                                .expect("constant list kind should match usize values"),
+                        )),
+                    ),
+                    ConstantKind::U32 => BuiltGraphNode::from_handle(
+                        builder.add(constant(
+                            Vec::<u32>::try_from_constant_value(self.value.clone())
+                                .expect("constant list kind should match u32 values"),
+                        )),
+                    ),
+                    ConstantKind::U64 => BuiltGraphNode::from_handle(
+                        builder.add(constant(
+                            Vec::<u64>::try_from_constant_value(self.value.clone())
+                                .expect("constant list kind should match u64 values"),
+                        )),
+                    ),
+                    ConstantKind::I32 => BuiltGraphNode::from_handle(
+                        builder.add(constant(
+                            Vec::<i32>::try_from_constant_value(self.value.clone())
+                                .expect("constant list kind should match i32 values"),
+                        )),
+                    ),
+                    ConstantKind::I64 => BuiltGraphNode::from_handle(
+                        builder.add(constant(
+                            Vec::<i64>::try_from_constant_value(self.value.clone())
+                                .expect("constant list kind should match i64 values"),
+                        )),
+                    ),
+                    ConstantKind::Bool => BuiltGraphNode::from_handle(
+                        builder.add(constant(
+                            Vec::<bool>::try_from_constant_value(self.value.clone())
+                                .expect("constant list kind should match bool values"),
+                        )),
+                    ),
+                    ConstantKind::String => BuiltGraphNode::from_handle(
+                        builder.add(constant(
+                            Vec::<String>::try_from_constant_value(self.value.clone())
+                                .expect("constant list kind should match string values"),
+                        )),
+                    ),
+                    _ => BuiltGraphNode::from_handle(builder.add(constant(self.value.clone()))),
+                },
+                ConstantKind::MixedList | ConstantKind::EmptyList => {
+                    BuiltGraphNode::from_handle(builder.add(constant(self.value.clone())))
+                }
+                _ => BuiltGraphNode::from_handle(builder.add(constant(self.value.clone()))),
+            },
         }
     }
 }

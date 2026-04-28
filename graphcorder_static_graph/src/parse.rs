@@ -4,13 +4,11 @@ use syn::punctuated::Punctuated;
 use syn::{Expr, FieldValue, Ident, Result, Token, Type};
 
 use crate::types::{
-    ConnectDecl, Endpoint, EndpointSet, GraphItem, NodeDecl, NodeDeclKind, StaticGraphInput,
+    EdgeStmt, Endpoint, EndpointSet, GraphItem, NodeDecl, NodeDeclKind, StaticGraphInput,
 };
 
 mod kw {
     syn::custom_keyword!(registry);
-    syn::custom_keyword!(node);
-    syn::custom_keyword!(connect);
 }
 
 impl Parse for StaticGraphInput {
@@ -22,12 +20,12 @@ impl Parse for StaticGraphInput {
 
         let mut items = Vec::new();
         while !input.is_empty() {
-            if input.peek(kw::node) {
+            if input.peek(Token![let]) {
                 items.push(GraphItem::Node(input.parse()?));
-            } else if input.peek(kw::connect) {
-                items.push(GraphItem::Connect(input.parse()?));
+            } else if input.peek(Ident) || input.peek(syn::token::Bracket) {
+                items.push(GraphItem::Edge(input.parse()?));
             } else {
-                return Err(input.error("expected `node` or `connect`"));
+                return Err(input.error("expected `let` or an edge statement"));
             }
         }
 
@@ -37,7 +35,7 @@ impl Parse for StaticGraphInput {
 
 impl Parse for NodeDecl {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        input.parse::<kw::node>()?;
+        input.parse::<Token![let]>()?;
         let name = input.parse::<Ident>()?;
         input.parse::<Token![=]>()?;
         let kind = if is_typed_node_decl(input) {
@@ -54,14 +52,18 @@ impl Parse for NodeDecl {
     }
 }
 
-impl Parse for ConnectDecl {
+impl Parse for EdgeStmt {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        input.parse::<kw::connect>()?;
-        let source = input.parse::<EndpointSet>()?;
-        input.parse::<Token![->]>()?;
-        let target = input.parse::<EndpointSet>()?;
+        let mut chain = vec![input.parse::<EndpointSet>()?];
+        while input.peek(Token![->]) {
+            input.parse::<Token![->]>()?;
+            chain.push(input.parse::<EndpointSet>()?);
+        }
         input.parse::<Token![;]>()?;
-        Ok(Self { source, target })
+        if chain.len() < 2 {
+            return Err(input.error("edge statement must connect at least two endpoints"));
+        }
+        Ok(Self { chain })
     }
 }
 
