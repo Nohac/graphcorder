@@ -61,6 +61,14 @@ dependencies = [
 [[package]]
 name = "facet-dessert"
 version = "0.46.0"
+dependencies = [
+ "facet-core",
+ "facet-reflect",
+]
+
+[[package]]
+name = "facet-dessert"
+version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4505ec8ef086d776fd99b86fb17e3d1c711188d27aa72845e64a30146226e3b"
 dependencies = [
@@ -71,14 +79,35 @@ dependencies = [
 [[package]]
 name = "facet-format"
 version = "0.47.0"
+dependencies = [
+ "facet-core",
+ "facet-dessert 0.46.0",
+ "facet-path",
+ "facet-reflect",
+ "facet-solver",
+]
+
+[[package]]
+name = "facet-format"
+version = "0.47.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c5cd7279699433cea9d921165ebc6fad0526574e6e8e6d1144b3bc5136e8c3a"
 dependencies = [
  "facet-core",
- "facet-dessert",
+ "facet-dessert 0.46.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "facet-path",
  "facet-reflect",
  "facet-solver",
+]
+
+[[package]]
+name = "facet-json"
+version = "0.46.0"
+dependencies = [
+ "facet",
+ "facet-core",
+ "facet-format 0.47.0",
+ "facet-reflect",
 ]
 
 [[package]]
@@ -89,19 +118,17 @@ checksum = "5347e8a3788ab46119434c8fa011a49151c7c2d789bc50d0cfa914b878948593"
 dependencies = [
  "facet",
  "facet-core",
- "facet-format",
+ "facet-format 0.47.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "facet-reflect",
 ]
 
 [[package]]
 name = "facet-json-schema"
 version = "0.46.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8ed0ee7401b61690dc57a3c36455b8f1cc59b9d08017bd632631549ff44d901"
 dependencies = [
  "facet",
  "facet-core",
- "facet-json",
+ "facet-json 0.46.0",
 ]
 
 [[package]]
@@ -204,7 +231,7 @@ name = "graphcorder"
 version = "0.1.0"
 dependencies = [
  "facet",
- "facet-json",
+ "facet-json 0.46.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "facet-json-schema",
  "facet-pretty",
  "graphcorder_derive",

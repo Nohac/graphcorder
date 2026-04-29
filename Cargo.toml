@@ -6,6 +6,9 @@ edition = "2024"
 [workspace]
 members = ["graphcorder_derive", "graphcorder_static_graph"]
 
+[patch.crates-io]
+facet-json-schema = { path = "/home/jonas/Work/Remote/facet-format/facet-json-schema" }
+
 [dependencies]
 facet = "0.46.0"
 facet-json = "0.46.0"
