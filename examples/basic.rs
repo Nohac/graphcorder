@@ -160,7 +160,7 @@ impl NodeDefinition for PrintDynamicNode {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let instance = graphcorder::init::<Node>();
     let builder = static_graph! {
-        registry: Node;
+        instance;
 
         let producer = ProducerNode {
             value: vec![6.0, 12.0, 18.0, 24.0],

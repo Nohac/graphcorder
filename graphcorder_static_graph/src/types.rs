@@ -1,7 +1,7 @@
 use syn::{Expr, FieldValue, Ident, Token, Type, punctuated::Punctuated};
 
 pub struct StaticGraphInput {
-    pub registry: Type,
+    pub instance: Expr,
     pub items: Vec<GraphItem>,
 }
 

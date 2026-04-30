@@ -214,10 +214,12 @@ enum Node {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let instance = graphcorder::init::<Node>();
+
     println!("=== fan-out: one stream -> two consumers ===");
     {
         let builder = static_graph! {
-            registry: Node;
+            instance;
             let source = CounterNode { count: 5 };
             let scale  = ScaleNode { factor: 10.0 };
             let a = PrintNode { label: "A".into() };
@@ -231,7 +233,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== pipeline: stream -> scale -> print ===");
     {
         let builder = static_graph! {
-            registry: Node;
+            instance;
             let source = CounterNode { count: 4 };
             let scale  = ScaleNode { factor: 10.0 };
             let sink   = PrintNode { label: "scaled".into() };
@@ -243,7 +245,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== bounded stream (capacity 2) ===");
     {
         let builder = static_graph! {
-            registry: Node;
+            instance;
             let source = BoundedCounterNode { count: 6 };
             let sink   = BoundedPrintNode { label: "bounded".into() };
             source -> sink;
@@ -255,7 +257,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== cross-N: Stream<f32> -> Stream<f32, 4> ===");
     {
         let builder = static_graph! {
-            registry: Node;
+            instance;
             let source = CounterNode { count: 3 };
             let sink   = BoundedPrintNode { label: "cross-N".into() };
             source -> sink;
@@ -267,7 +269,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== scalar f32 -> Stream<f32> ===");
     {
         let builder = static_graph! {
-            registry: Node;
+            instance;
             let source = SingleValueNode { value: 42.0 };
             let sink   = PrintNode { label: "from-scalar".into() };
             source -> sink;

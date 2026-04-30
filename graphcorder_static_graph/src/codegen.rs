@@ -9,7 +9,7 @@ use crate::types::{
 };
 
 pub fn expand(input: StaticGraphInput) -> Result<TokenStream> {
-    let registry = input.registry;
+    let instance = input.instance;
 
     let mut node_decls = Vec::new();
     let mut connect_decls = Vec::new();
@@ -51,15 +51,11 @@ pub fn expand(input: StaticGraphInput) -> Result<TokenStream> {
         .collect::<Result<Vec<_>>>()?;
 
     Ok(quote! {{
-        let instance = ::graphcorder::init::<#registry>();
-        let mut builder = instance.builder();
+        let mut builder = (#instance).builder();
         #validations
         #( #node_defs )*
         #( #connect_defs )*
-        ::core::result::Result::<
-            ::graphcorder::framework::GraphBuilder<#registry>,
-            ::graphcorder::framework::GraphError,
-        >::Ok(builder)
+        ::core::result::Result::<_, ::graphcorder::framework::GraphError>::Ok(builder)
     }})
 }
 

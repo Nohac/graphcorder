@@ -7,15 +7,9 @@ use crate::types::{
     EdgeStmt, Endpoint, EndpointSet, GraphItem, NodeDecl, NodeDeclKind, StaticGraphInput,
 };
 
-mod kw {
-    syn::custom_keyword!(registry);
-}
-
 impl Parse for StaticGraphInput {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
-        input.parse::<kw::registry>()?;
-        input.parse::<Token![:]>()?;
-        let registry = input.parse::<Type>()?;
+        let instance = input.parse::<Expr>()?;
         input.parse::<Token![;]>()?;
 
         let mut items = Vec::new();
@@ -29,7 +23,7 @@ impl Parse for StaticGraphInput {
             }
         }
 
-        Ok(Self { registry, items })
+        Ok(Self { instance, items })
     }
 }
 

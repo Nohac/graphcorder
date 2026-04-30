@@ -61,14 +61,6 @@ dependencies = [
 [[package]]
 name = "facet-dessert"
 version = "0.46.0"
-dependencies = [
- "facet-core",
- "facet-reflect",
-]
-
-[[package]]
-name = "facet-dessert"
-version = "0.46.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4505ec8ef086d776fd99b86fb17e3d1c711188d27aa72845e64a30146226e3b"
 dependencies = [
@@ -77,14 +69,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "facet-format"
-version = "0.47.0"
+name = "facet-dessert"
+version = "0.46.0"
+source = "git+https://github.com/Nohac/facet-format#b30ebcb038ac2c051fe63a5245da3d8a75369e76"
 dependencies = [
  "facet-core",
- "facet-dessert 0.46.0",
- "facet-path",
  "facet-reflect",
- "facet-solver",
 ]
 
 [[package]]
@@ -101,13 +91,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "facet-json"
-version = "0.46.0"
+name = "facet-format"
+version = "0.47.0"
+source = "git+https://github.com/Nohac/facet-format#b30ebcb038ac2c051fe63a5245da3d8a75369e76"
 dependencies = [
- "facet",
  "facet-core",
- "facet-format 0.47.0",
+ "facet-dessert 0.46.0 (git+https://github.com/Nohac/facet-format)",
+ "facet-path",
  "facet-reflect",
+ "facet-solver",
 ]
 
 [[package]]
@@ -123,12 +115,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "facet-json-schema"
+name = "facet-json"
 version = "0.46.0"
+source = "git+https://github.com/Nohac/facet-format#b30ebcb038ac2c051fe63a5245da3d8a75369e76"
 dependencies = [
  "facet",
  "facet-core",
- "facet-json 0.46.0",
+ "facet-format 0.47.0 (git+https://github.com/Nohac/facet-format)",
+ "facet-reflect",
+]
+
+[[package]]
+name = "facet-json-schema"
+version = "0.46.0"
+source = "git+https://github.com/Nohac/facet-format#b30ebcb038ac2c051fe63a5245da3d8a75369e76"
+dependencies = [
+ "facet",
+ "facet-core",
+ "facet-json 0.46.0 (git+https://github.com/Nohac/facet-format)",
 ]
 
 [[package]]
