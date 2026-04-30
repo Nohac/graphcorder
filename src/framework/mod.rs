@@ -10,4 +10,6 @@ pub use crate::graph::{
     StaticInputPorts, StaticNodeDsl, StaticOutputPorts, StaticPortInfo, Stream,
     PrimitiveConstant, TryFromConstantValue, constant, has_duplicate_single_connections,
     has_missing_required_ports, has_port, init, is_single_port, only_port_name,
+    validate_static_implicit_port, validate_static_input_connections,
+    validate_static_port_exists,
 };

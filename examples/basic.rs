@@ -173,32 +173,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let print_2x = PrintNode {
             label: "programmatic result2".into(),
         };
-        // let print_dynamic = PrintDynamicNode {
-        //     label: "dynamic constant result".into(),
-        // };
+        let print_dynamic = PrintDynamicNode {
+            label: "dynamic constant result".into(),
+        };
         // let print_constant_list = PrintNode {
         //     label: "constant list result".into(),
         // };
         // let print_dynamic_list = PrintDynamicNode {
         //     label: "dynamic constant list result".into(),
         // };
-        // let constant_number = "test".to_string();
+        let constant_number = "test".to_string();
         // let constant_numbers = &[1.0f32, 2.0, 3.0, 4.0];
 
         producer -> scale_1x -> print_1x;
         producer -> scale_2x -> print_2x;
-        // constant_number -> print_dynamic;
+        constant_number -> print_dynamic;
         // constant_numbers -> [print_constant_list, print_dynamic_list];
     }?;
 
-    // let spec = builder.graph_spec();
+    let spec = builder.graph_spec();
     // println!("{}", spec.pretty());
-    // println!("{}", facet_json::to_string_pretty(&spec)?);
-    instance.graph_schema();
-    // println!(
-    //     "{}",
-    //     facet_json::to_string_pretty()?
-    // );
+    println!("{}", facet_json::to_string_pretty(&spec)?);
+    println!(
+        "{}",
+        facet_json::to_string_pretty(&instance.graph_schema())?
+    );
 
     println!("========= programmatic output");
     builder.build().run().await?;

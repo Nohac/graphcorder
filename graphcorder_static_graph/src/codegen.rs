@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
-use proc_macro2::TokenStream;
-use quote::{quote, quote_spanned};
+use proc_macro2::{Span, TokenStream, TokenTree};
+use quote::{format_ident, quote};
 use syn::{Error, Result};
 
 use crate::types::{
@@ -23,14 +23,7 @@ pub fn expand(input: StaticGraphInput) -> Result<TokenStream> {
 
     validate(&node_decls, &connect_decls)?;
 
-    let port_validations = connect_decls
-        .iter()
-        .map(|connect| expand_port_validation(connect, &node_decls))
-        .collect::<Result<Vec<_>>>()?;
-    let node_validations = node_decls
-        .iter()
-        .map(|node| expand_required_input_validation(node, &connect_decls, &node_decls))
-        .collect::<Result<Vec<_>>>()?;
+    let validations = expand_validation_module(&node_decls, &connect_decls)?;
 
     let node_defs = node_decls.iter().map(|node| {
         let name = &node.name;
@@ -51,16 +44,16 @@ pub fn expand(input: StaticGraphInput) -> Result<TokenStream> {
         }
     });
 
+    let mut next_edge_id = 0;
     let connect_defs = connect_decls
         .iter()
-        .map(|connect| expand_edge_stmt(connect, &node_decls))
+        .map(|connect| expand_edge_stmt(connect, &node_decls, &mut next_edge_id))
         .collect::<Result<Vec<_>>>()?;
 
     Ok(quote! {{
         let instance = ::graphcorder::init::<#registry>();
         let mut builder = instance.builder();
-        #( #port_validations )*
-        #( #node_validations )*
+        #validations
         #( #node_defs )*
         #( #connect_defs )*
         ::core::result::Result::<
@@ -70,11 +63,20 @@ pub fn expand(input: StaticGraphInput) -> Result<TokenStream> {
     }})
 }
 
-fn expand_edge_stmt(edge: &EdgeStmt, nodes: &[NodeDecl]) -> Result<TokenStream> {
+fn expand_edge_stmt(
+    edge: &EdgeStmt,
+    nodes: &[NodeDecl],
+    next_edge_id: &mut usize,
+) -> Result<TokenStream> {
     let mut statements = Vec::new();
 
     for pair in edge.chain.windows(2) {
-        statements.push(expand_connect_pair(&pair[0], &pair[1], nodes)?);
+        statements.push(expand_connect_pair(
+            &pair[0],
+            &pair[1],
+            nodes,
+            next_edge_id,
+        )?);
     }
 
     Ok(quote! { #( #statements )* })
@@ -84,17 +86,18 @@ fn expand_connect_pair(
     source_set: &EndpointSet,
     target_set: &EndpointSet,
     nodes: &[NodeDecl],
+    next_edge_id: &mut usize,
 ) -> Result<TokenStream> {
     let sources = endpoints(source_set);
     let targets = endpoints(target_set);
 
     match (sources.len(), targets.len()) {
-        (1, 1) => expand_named_connect(&sources[0], &targets[0], nodes),
+        (1, 1) => expand_named_connect(&sources[0], &targets[0], nodes, next_edge_id),
         (1, _) => {
             let source = &sources[0];
             let statements = targets
                 .iter()
-                .map(|target| expand_named_connect(source, target, nodes))
+                .map(|target| expand_named_connect(source, target, nodes, next_edge_id))
                 .collect::<Result<Vec<_>>>()?;
             Ok(quote! { #( #statements )* })
         }
@@ -102,7 +105,7 @@ fn expand_connect_pair(
             let target = &targets[0];
             let statements = sources
                 .iter()
-                .map(|source| expand_named_connect(source, target, nodes))
+                .map(|source| expand_named_connect(source, target, nodes, next_edge_id))
                 .collect::<Result<Vec<_>>>()?;
             Ok(quote! { #( #statements )* })
         }
@@ -117,41 +120,85 @@ fn expand_named_connect(
     source: &Endpoint,
     target: &Endpoint,
     nodes: &[NodeDecl],
+    next_edge_id: &mut usize,
 ) -> Result<TokenStream> {
     let source_expr = source_port_expr(source);
     let target_expr = target_port_expr(target);
-    let span = endpoint_span(target);
-
+    let edge_id = *next_edge_id;
+    *next_edge_id += 1;
+    let source_port = format_ident!("__graphcorder_edge_{edge_id}_source");
+    let target_port = format_ident!("__graphcorder_edge_{edge_id}_target");
     let source_node = find_node_decl(nodes, &source.node)?;
 
     match source_node.kind {
-        NodeDeclKind::Constant(_) => Ok(quote_spanned! {span=>
-            builder.connect_constant_source(#source_expr, #target_expr)?;
+        NodeDeclKind::Constant(_) => Ok(quote! {
+            let #source_port = #source_expr;
+            let #target_port = #target_expr;
+            builder.connect_constant_source(#source_port, #target_port)?;
         }),
-        NodeDeclKind::Typed { .. } => Ok(quote_spanned! {span=>
-            builder.connect(#source_expr, #target_expr)?;
+        NodeDeclKind::Typed { .. } => Ok(quote! {
+            let #source_port = #source_expr;
+            let #target_port = #target_expr;
+            builder.connect(#source_port, #target_port)?;
         }),
     }
 }
 
-fn expand_port_validation(edge: &EdgeStmt, nodes: &[NodeDecl]) -> Result<TokenStream> {
+fn expand_validation_module(nodes: &[NodeDecl], edges: &[EdgeStmt]) -> Result<TokenStream> {
+    let endpoint_validations = expand_endpoint_validations(nodes, edges)?;
+    let input_validations = nodes
+        .iter()
+        .map(|node| expand_required_input_validation(node, edges, nodes))
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(quote! {
+        #[doc(hidden)]
+        #[allow(non_snake_case, non_upper_case_globals)]
+        mod __graphcorder_static_graph_validation {
+            use super::*;
+            #( #endpoint_validations )*
+            #( #input_validations )*
+        }
+    })
+}
+
+fn expand_endpoint_validations(
+    nodes: &[NodeDecl],
+    edges: &[EdgeStmt],
+) -> Result<Vec<TokenStream>> {
+    let mut seen = BTreeSet::new();
     let mut validations = Vec::new();
-    for pair in edge.chain.windows(2) {
-        validations.extend(
-            endpoints(&pair[0])
-                .iter()
-                .map(|source| expand_endpoint_validation(source, nodes, true))
-                .collect::<Result<Vec<_>>>()?,
-        );
-        validations.extend(
-            endpoints(&pair[1])
-                .iter()
-                .map(|target| expand_endpoint_validation(target, nodes, false))
-                .collect::<Result<Vec<_>>>()?,
-        );
+
+    for edge in edges {
+        for pair in edge.chain.windows(2) {
+            for source in endpoints(&pair[0]) {
+                push_endpoint_validation(&mut seen, &mut validations, source, nodes, true)?;
+            }
+            for target in endpoints(&pair[1]) {
+                push_endpoint_validation(&mut seen, &mut validations, target, nodes, false)?;
+            }
+        }
     }
 
-    Ok(quote! { #( #validations )* })
+    Ok(validations)
+}
+
+fn push_endpoint_validation(
+    seen: &mut BTreeSet<(String, bool, Option<String>)>,
+    validations: &mut Vec<TokenStream>,
+    endpoint: &Endpoint,
+    nodes: &[NodeDecl],
+    is_source: bool,
+) -> Result<()> {
+    let key = (
+        endpoint.node.to_string(),
+        is_source,
+        endpoint.port.as_ref().map(ToString::to_string),
+    );
+    if seen.insert(key) {
+        validations.push(expand_endpoint_validation(endpoint, nodes, is_source)?);
+    }
+    Ok(())
 }
 
 fn expand_endpoint_validation(
@@ -161,31 +208,18 @@ fn expand_endpoint_validation(
 ) -> Result<TokenStream> {
     let node = find_node_decl(nodes, &endpoint.node)?;
     let ports_expr = ports_expr(node, is_source);
-    let role = if is_source { "output" } else { "input" };
 
     if let Some(port) = &endpoint.port {
         let port_name = port.to_string();
-        let message = format!("unknown {role} port `{port_name}`");
-        let span = port.span();
-        Ok(quote_spanned! {span=>
+        Ok(quote! {
             const _: () = {
-                if !::graphcorder::framework::has_port(#ports_expr, #port_name) {
-                    panic!(#message);
-                }
+                ::graphcorder::framework::validate_static_port_exists(#ports_expr, #port_name);
             };
         })
     } else {
-        let message = if is_source {
-            "implicit source port requires exactly one output port"
-        } else {
-            "implicit target port requires exactly one input port"
-        };
-        let span = endpoint.node.span();
-        Ok(quote_spanned! {span=>
+        Ok(quote! {
             const _: () = {
-                if ::graphcorder::framework::only_port_name(#ports_expr).is_none() {
-                    panic!(#message);
-                }
+                ::graphcorder::framework::validate_static_implicit_port(#ports_expr, #is_source);
             };
         })
     }
@@ -204,17 +238,12 @@ fn expand_required_input_validation(
         .collect::<Result<Vec<_>>>()?;
     let ports_expr = ports_expr(node, false);
 
-    let span = node.name.span();
-    Ok(quote_spanned! {span=>
+    Ok(quote! {
         const _: () = {
-            const PORTS: &[::graphcorder::framework::StaticPortInfo] = #ports_expr;
-            const CONNECTED: &[&str] = &[ #( #connected_ports ),* ];
-            if ::graphcorder::framework::has_duplicate_single_connections(PORTS, CONNECTED) {
-                panic!("duplicate connection to single input port");
-            }
-            if ::graphcorder::framework::has_missing_required_ports(PORTS, CONNECTED) {
-                panic!("node is missing required input connections");
-            }
+            ::graphcorder::framework::validate_static_input_connections(
+                #ports_expr,
+                &[ #( #connected_ports ),* ],
+            );
         };
     })
 }
@@ -307,7 +336,7 @@ fn find_node_decl<'a>(nodes: &'a [NodeDecl], name: &syn::Ident) -> Result<&'a No
 }
 
 fn ports_expr(node: &NodeDecl, is_source: bool) -> TokenStream {
-    match &node.kind {
+    let tokens = match &node.kind {
         NodeDeclKind::Typed { node_ty, .. } => {
             if is_source {
                 quote! {
@@ -326,7 +355,35 @@ fn ports_expr(node: &NodeDecl, is_source: bool) -> TokenStream {
                 quote! { <() as ::graphcorder::framework::StaticInputPorts>::PORTS }
             }
         }
-    }
+    };
+
+    neutralize_spans(tokens)
+}
+
+fn neutralize_spans(tokens: TokenStream) -> TokenStream {
+    tokens
+        .into_iter()
+        .map(|token| match token {
+            TokenTree::Group(group) => {
+                let mut group =
+                    proc_macro2::Group::new(group.delimiter(), neutralize_spans(group.stream()));
+                group.set_span(Span::call_site());
+                TokenTree::Group(group)
+            }
+            TokenTree::Ident(mut ident) => {
+                ident.set_span(Span::call_site());
+                TokenTree::Ident(ident)
+            }
+            TokenTree::Punct(mut punct) => {
+                punct.set_span(Span::call_site());
+                TokenTree::Punct(punct)
+            }
+            TokenTree::Literal(mut literal) => {
+                literal.set_span(Span::call_site());
+                TokenTree::Literal(literal)
+            }
+        })
+        .collect()
 }
 
 fn endpoints(set: &EndpointSet) -> &[Endpoint] {
@@ -340,14 +397,6 @@ fn edge_targets(edge: &EdgeStmt) -> impl Iterator<Item = Endpoint> + '_ {
     edge.chain
         .windows(2)
         .flat_map(|pair| endpoints(&pair[1]).iter().cloned())
-}
-
-fn endpoint_span(endpoint: &Endpoint) -> proc_macro2::Span {
-    endpoint
-        .port
-        .as_ref()
-        .map(|port| port.span())
-        .unwrap_or_else(|| endpoint.node.span())
 }
 
 fn validate_endpoint_exists(

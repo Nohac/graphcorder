@@ -1124,6 +1124,31 @@ pub const fn has_duplicate_single_connections(
     false
 }
 
+pub const fn validate_static_port_exists(ports: &[StaticPortInfo], name: &str) {
+    if !has_port(ports, name) {
+        panic!("unknown static graph port");
+    }
+}
+
+pub const fn validate_static_implicit_port(ports: &[StaticPortInfo], is_source: bool) {
+    if only_port_name(ports).is_none() {
+        if is_source {
+            panic!("implicit source port requires exactly one output port");
+        } else {
+            panic!("implicit target port requires exactly one input port");
+        }
+    }
+}
+
+pub const fn validate_static_input_connections(ports: &[StaticPortInfo], connected: &[&str]) {
+    if has_duplicate_single_connections(ports, connected) {
+        panic!("duplicate connection to single input port");
+    }
+    if has_missing_required_ports(ports, connected) {
+        panic!("node is missing required input connections");
+    }
+}
+
 pub const fn only_port_name(ports: &[StaticPortInfo]) -> Option<&'static str> {
     if ports.len() == 1 {
         Some(ports[0].name)
