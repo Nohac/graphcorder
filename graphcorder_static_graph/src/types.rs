@@ -8,6 +8,7 @@ pub struct StaticGraphInput {
 pub enum GraphItem {
     Node(NodeDecl),
     Edge(EdgeStmt),
+    Output(OutputDecl),
 }
 
 pub struct NodeDecl {
@@ -25,6 +26,11 @@ pub enum NodeDeclKind {
 
 pub struct EdgeStmt {
     pub chain: Vec<EndpointSet>,
+}
+
+pub struct OutputDecl {
+    pub name: Ident,
+    pub source: Endpoint,
 }
 
 pub enum EndpointSet {

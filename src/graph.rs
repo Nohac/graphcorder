@@ -1579,6 +1579,74 @@ impl Graph {
     }
 }
 
+pub struct GraphOutput<T> {
+    receiver: mpsc::Receiver<T>,
+}
+
+impl<T> GraphOutput<T> {
+    fn new(receiver: mpsc::Receiver<T>) -> Self {
+        Self { receiver }
+    }
+
+    pub async fn next(&mut self) -> Option<T> {
+        self.receiver.recv().await
+    }
+
+    pub async fn take(&mut self) -> Option<T> {
+        self.next().await
+    }
+}
+
+pub struct StaticGraphBuilder<R, O> {
+    builder: GraphBuilder<R>,
+    outputs: O,
+}
+
+impl<R, O> StaticGraphBuilder<R, O>
+where
+    R: RegisteredNodeSpec,
+{
+    pub fn new(builder: GraphBuilder<R>, outputs: O) -> Self {
+        Self { builder, outputs }
+    }
+
+    pub fn build(self) -> StaticGraph<O> {
+        StaticGraph {
+            graph: self.builder.build(),
+            outputs: Some(self.outputs),
+        }
+    }
+
+    pub fn export_nodes(&self) -> &[R] {
+        self.builder.export_nodes()
+    }
+
+    pub fn edges(&self) -> &[GraphEdgeSnapshot] {
+        self.builder.edges()
+    }
+
+    pub fn graph_spec(&self) -> GraphSpec<R> {
+        self.builder.graph_spec()
+    }
+}
+
+pub struct StaticGraph<O> {
+    graph: Graph,
+    outputs: Option<O>,
+}
+
+impl<O> StaticGraph<O> {
+    pub fn take_outputs(&mut self) -> O {
+        self.outputs
+            .take()
+            .expect("static graph outputs can only be taken once")
+    }
+
+    pub async fn run(self) -> Result<(), GraphError> {
+        self.graph.run().await
+    }
+}
+
 pub struct GraphBuilder<R> {
     nodes: Vec<NodeRegistration>,
     channel_capacity: usize,
@@ -1685,6 +1753,32 @@ impl<R: RegisteredNodeSpec> GraphBuilder<R> {
         In: ConnectFromConstantSource<T>,
     {
         In::connect_from_constant_source(self, source, target)
+    }
+
+    pub fn output<Out: OutputPortValue>(
+        &mut self,
+        source: OutputPort<Out>,
+    ) -> Result<GraphOutput<Out::ChannelItem>, GraphError> {
+        let source_erased = ErasedOutputPort::new::<Out>(source);
+        let cap = source_erased
+            .capacity_override
+            .unwrap_or(self.channel_capacity);
+        let receiver = (source_erased.attach)(
+            &mut self.nodes,
+            source_erased.source_node_idx,
+            source_erased.source_port_name,
+            cap,
+        )?;
+        let receiver = receiver
+            .downcast::<mpsc::Receiver<Out::ChannelItem>>()
+            .map(|boxed| *boxed)
+            .map_err(|_| {
+                GraphError::Validation(format!(
+                    "output port `{}` had an unexpected tap receiver type",
+                    source_erased.source_port_name
+                ))
+            })?;
+        Ok(GraphOutput::new(receiver))
     }
 
     fn connect_typed_into_constant_value<T>(

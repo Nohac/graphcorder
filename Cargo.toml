@@ -14,6 +14,7 @@ facet = "0.46.0"
 facet-json = "0.46.0"
 facet-json-schema = "0.46.0"
 facet-pretty = "0.46.0"
+futures = "0.3.32"
 graphcorder_derive = { path = "graphcorder_derive" }
 graphcorder_static_graph = { path = "graphcorder_static_graph" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }

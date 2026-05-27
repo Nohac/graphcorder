@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use facet::Facet;
+use futures::future::join_all;
 use graphcorder::{
     GraphNode, NodeInputs, NodeOutputs, NodeRegistry,
     framework::{GraphError, NodeDefinition, Stream},
@@ -216,66 +217,60 @@ enum Node {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let instance = graphcorder::init::<Node>();
 
+    let mut jobs = vec![];
+
     println!("=== fan-out: one stream -> two consumers ===");
-    {
-        let builder = static_graph! {
-            instance;
-            let source = CounterNode { count: 5 };
-            let scale  = ScaleNode { factor: 10.0 };
-            let a = PrintNode { label: "A".into() };
-            let b = PrintNode { label: "B".into() };
-            source -> [scale, b];
-            scale -> a;
-        }?;
-        builder.build().run().await?;
-    }
+    let builder = static_graph! {
+        instance;
+        let source = CounterNode { count: 5 };
+        let scale  = ScaleNode { factor: 10.0 };
+        let a = PrintNode { label: "A".into() };
+        let b = PrintNode { label: "B".into() };
+        source -> [scale, b];
+        scale -> a;
+    }?;
+    jobs.push(builder.build().run());
 
     println!("\n=== pipeline: stream -> scale -> print ===");
-    {
-        let builder = static_graph! {
-            instance;
-            let source = CounterNode { count: 4 };
-            let scale  = ScaleNode { factor: 10.0 };
-            let sink   = PrintNode { label: "scaled".into() };
-            source -> scale -> sink;
-        }?;
-        builder.build().run().await?;
-    }
+    let builder = static_graph! {
+        instance;
+        let source = CounterNode { count: 4 };
+        let scale  = ScaleNode { factor: 10.0 };
+        let sink   = PrintNode { label: "scaled".into() };
+        source -> scale -> sink;
+    }?;
+    jobs.push(builder.build().run());
 
     println!("\n=== bounded stream (capacity 2) ===");
-    {
-        let builder = static_graph! {
-            instance;
-            let source = BoundedCounterNode { count: 6 };
-            let sink   = BoundedPrintNode { label: "bounded".into() };
-            source -> sink;
-        }?;
-        builder.build().run().await?;
-    }
+    let builder = static_graph! {
+        instance;
+        let source = BoundedCounterNode { count: 6 };
+        let sink   = BoundedPrintNode { label: "bounded".into() };
+        source -> sink;
+    }?;
+    jobs.push(builder.build().run());
 
     // Stream<f32> output -> Stream<f32, 4> input: different N values are compatible.
     println!("\n=== cross-N: Stream<f32> -> Stream<f32, 4> ===");
-    {
-        let builder = static_graph! {
-            instance;
-            let source = CounterNode { count: 3 };
-            let sink   = BoundedPrintNode { label: "cross-N".into() };
-            source -> sink;
-        }?;
-        builder.build().run().await?;
-    }
+    let builder = static_graph! {
+        instance;
+        let source = CounterNode { count: 3 };
+        let sink   = BoundedPrintNode { label: "cross-N".into() };
+        source -> sink;
+    }?;
+    jobs.push(builder.build().run());
 
     // f32 scalar output -> Stream<f32> input: consumer sees a one-element stream.
     println!("\n=== scalar f32 -> Stream<f32> ===");
-    {
-        let builder = static_graph! {
-            instance;
-            let source = SingleValueNode { value: 42.0 };
-            let sink   = PrintNode { label: "from-scalar".into() };
-            source -> sink;
-        }?;
-        builder.build().run().await?;
-    }
+    let builder = static_graph! {
+        instance;
+        let source = SingleValueNode { value: 42.0 };
+        let sink   = PrintNode { label: "from-scalar".into() };
+        source -> sink;
+    }?;
+    jobs.push(builder.build().run());
+
+    join_all(jobs).await;
 
     Ok(())
 }

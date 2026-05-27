@@ -5,7 +5,8 @@ use quote::{format_ident, quote};
 use syn::{Error, Result};
 
 use crate::types::{
-    EdgeStmt, Endpoint, EndpointSet, GraphItem, NodeDecl, NodeDeclKind, StaticGraphInput,
+    EdgeStmt, Endpoint, EndpointSet, GraphItem, NodeDecl, NodeDeclKind, OutputDecl,
+    StaticGraphInput,
 };
 
 pub fn expand(input: StaticGraphInput) -> Result<TokenStream> {
@@ -13,17 +14,19 @@ pub fn expand(input: StaticGraphInput) -> Result<TokenStream> {
 
     let mut node_decls = Vec::new();
     let mut connect_decls = Vec::new();
+    let mut output_decls = Vec::new();
 
     for item in input.items {
         match item {
             GraphItem::Node(node) => node_decls.push(node),
             GraphItem::Edge(edge) => connect_decls.push(edge),
+            GraphItem::Output(output) => output_decls.push(output),
         }
     }
 
-    validate(&node_decls, &connect_decls)?;
+    validate(&node_decls, &connect_decls, &output_decls)?;
 
-    let validations = expand_validation_module(&node_decls, &connect_decls)?;
+    let validations = expand_validation_module(&node_decls, &connect_decls, &output_decls)?;
 
     let node_defs = node_decls.iter().map(|node| {
         let name = &node.name;
@@ -49,13 +52,17 @@ pub fn expand(input: StaticGraphInput) -> Result<TokenStream> {
         .iter()
         .map(|connect| expand_edge_stmt(connect, &node_decls, &mut next_edge_id))
         .collect::<Result<Vec<_>>>()?;
+    let output_defs = expand_outputs(&output_decls)?;
 
     Ok(quote! {{
         let mut builder = (#instance).builder();
         #validations
         #( #node_defs )*
         #( #connect_defs )*
-        ::core::result::Result::<_, ::graphcorder::framework::GraphError>::Ok(builder)
+        #output_defs
+        ::core::result::Result::<_, ::graphcorder::framework::GraphError>::Ok(
+            ::graphcorder::framework::StaticGraphBuilder::new(builder, __graphcorder_outputs)
+        )
     }})
 }
 
@@ -140,8 +147,12 @@ fn expand_named_connect(
     }
 }
 
-fn expand_validation_module(nodes: &[NodeDecl], edges: &[EdgeStmt]) -> Result<TokenStream> {
-    let endpoint_validations = expand_endpoint_validations(nodes, edges)?;
+fn expand_validation_module(
+    nodes: &[NodeDecl],
+    edges: &[EdgeStmt],
+    outputs: &[OutputDecl],
+) -> Result<TokenStream> {
+    let endpoint_validations = expand_endpoint_validations(nodes, edges, outputs)?;
     let input_validations = nodes
         .iter()
         .map(|node| expand_required_input_validation(node, edges, nodes))
@@ -161,6 +172,7 @@ fn expand_validation_module(nodes: &[NodeDecl], edges: &[EdgeStmt]) -> Result<To
 fn expand_endpoint_validations(
     nodes: &[NodeDecl],
     edges: &[EdgeStmt],
+    outputs: &[OutputDecl],
 ) -> Result<Vec<TokenStream>> {
     let mut seen = BTreeSet::new();
     let mut validations = Vec::new();
@@ -175,8 +187,44 @@ fn expand_endpoint_validations(
             }
         }
     }
+    for output in outputs {
+        push_endpoint_validation(&mut seen, &mut validations, &output.source, nodes, true)?;
+    }
 
     Ok(validations)
+}
+
+fn expand_outputs(outputs: &[OutputDecl]) -> Result<TokenStream> {
+    if outputs.is_empty() {
+        return Ok(quote! {
+            let __graphcorder_outputs = ();
+        });
+    }
+
+    let type_params = (0..outputs.len())
+        .map(|index| format_ident!("Output{index}"))
+        .collect::<Vec<_>>();
+    let output_fields = outputs.iter().map(|output| &output.name).collect::<Vec<_>>();
+    let output_inits = outputs
+        .iter()
+        .map(|output| {
+            let name = &output.name;
+            let source = source_port_expr(&output.source);
+            quote! {
+                #name: builder.output(#source)?,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Ok(quote! {
+        struct __GraphcorderStaticOutputs<#( #type_params ),*> {
+            #( pub #output_fields: #type_params, )*
+        }
+
+        let __graphcorder_outputs = __GraphcorderStaticOutputs {
+            #( #output_inits )*
+        };
+    })
 }
 
 fn push_endpoint_validation(
@@ -276,7 +324,11 @@ fn resolved_target_port_expr(endpoint: &Endpoint, nodes: &[NodeDecl]) -> Result<
     }
 }
 
-fn validate(node_decls: &[NodeDecl], connect_decls: &[EdgeStmt]) -> Result<()> {
+fn validate(
+    node_decls: &[NodeDecl],
+    connect_decls: &[EdgeStmt],
+    output_decls: &[OutputDecl],
+) -> Result<()> {
     let mut errors: Option<Error> = None;
     let mut node_names = BTreeSet::new();
 
@@ -296,6 +348,7 @@ fn validate(node_decls: &[NodeDecl], connect_decls: &[EdgeStmt]) -> Result<()> {
         .collect::<BTreeSet<_>>();
 
     let mut seen_targets = BTreeSet::new();
+    let mut seen_outputs = BTreeSet::new();
 
     for connect in connect_decls {
         for pair in connect.chain.windows(2) {
@@ -314,6 +367,16 @@ fn validate(node_decls: &[NodeDecl], connect_decls: &[EdgeStmt]) -> Result<()> {
                     }
                 }
             }
+        }
+    }
+
+    for output in output_decls {
+        validate_endpoint_exists(&mut errors, &declared_nodes, &output.source);
+        if !seen_outputs.insert(output.name.to_string()) {
+            push_error(
+                &mut errors,
+                Error::new_spanned(&output.name, "duplicate output name"),
+            );
         }
     }
 

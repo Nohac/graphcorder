@@ -4,8 +4,13 @@ use syn::punctuated::Punctuated;
 use syn::{Expr, FieldValue, Ident, Result, Token, Type};
 
 use crate::types::{
-    EdgeStmt, Endpoint, EndpointSet, GraphItem, NodeDecl, NodeDeclKind, StaticGraphInput,
+    EdgeStmt, Endpoint, EndpointSet, GraphItem, NodeDecl, NodeDeclKind, OutputDecl,
+    StaticGraphInput,
 };
+
+mod kw {
+    syn::custom_keyword!(output);
+}
 
 impl Parse for StaticGraphInput {
     fn parse(input: ParseStream<'_>) -> Result<Self> {
@@ -16,10 +21,12 @@ impl Parse for StaticGraphInput {
         while !input.is_empty() {
             if input.peek(Token![let]) {
                 items.push(GraphItem::Node(input.parse()?));
+            } else if input.peek(kw::output) {
+                items.push(GraphItem::Output(input.parse()?));
             } else if input.peek(Ident) || input.peek(syn::token::Bracket) {
                 items.push(GraphItem::Edge(input.parse()?));
             } else {
-                return Err(input.error("expected `let` or an edge statement"));
+                return Err(input.error("expected `let`, `output`, or an edge statement"));
             }
         }
 
@@ -43,6 +50,17 @@ impl Parse for NodeDecl {
         };
         input.parse::<Token![;]>()?;
         Ok(Self { name, kind })
+    }
+}
+
+impl Parse for OutputDecl {
+    fn parse(input: ParseStream<'_>) -> Result<Self> {
+        input.parse::<kw::output>()?;
+        let name = input.parse::<Ident>()?;
+        input.parse::<Token![=]>()?;
+        let source = input.parse::<Endpoint>()?;
+        input.parse::<Token![;]>()?;
+        Ok(Self { name, source })
     }
 }
 

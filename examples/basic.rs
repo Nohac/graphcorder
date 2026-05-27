@@ -1,7 +1,7 @@
 use facet::Facet;
 use graphcorder::{
     GraphNode, NodeInputs, NodeOutputs, NodeRegistry,
-    framework::{GraphError, NodeDefinition},
+    framework::{GraphError, GraphSpec, NodeDefinition},
     static_graph,
 };
 
@@ -176,19 +176,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let print_dynamic = PrintDynamicNode {
             label: "dynamic constant result".into(),
         };
-        // let print_constant_list = PrintNode {
-        //     label: "constant list result".into(),
-        // };
-        // let print_dynamic_list = PrintDynamicNode {
-        //     label: "dynamic constant list result".into(),
-        // };
+        let print_constant_list = PrintNode {
+            label: "constant list result".into(),
+        };
+        let print_dynamic_list = PrintDynamicNode {
+            label: "dynamic constant list result".into(),
+        };
         let constant_number = "test".to_string();
-        // let constant_numbers = &[1.0f32, 2.0, 3.0, 4.0];
+        let constant_numbers = &[1.0f32, 2.0, 3.0, 4.0];
 
         producer -> scale_1x -> print_1x;
         producer -> scale_2x -> print_2x;
         constant_number -> print_dynamic;
-        // constant_numbers -> [print_constant_list, print_dynamic_list];
+        constant_numbers -> [print_constant_list, print_dynamic_list];
+
+        output scaled = scale_1x;
+        output constant = constant_number;
     }?;
 
     let spec = builder.graph_spec();
@@ -200,11 +203,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!("========= programmatic output");
-    builder.build().run().await?;
+    let mut graph = builder.build();
+    let mut outputs = graph.take_outputs();
+    graph.run().await?;
+    println!("captured scaled output: {:?}", outputs.scaled.take().await);
+    println!(
+        "captured constant output: {:?}",
+        outputs.constant.take().await
+    );
 
-    // println!("========= roundtrip output");
-    // let round_trip: GraphSpec<Node> = facet_json::from_str(&facet_json::to_string(&spec)?)?;
-    // instance.build_graph_from_spec(round_trip)?.run().await?;
+    println!("========= roundtrip output");
+    let round_trip: GraphSpec<Node> = facet_json::from_str(&facet_json::to_string(&spec)?)?;
+    instance.build_graph_from_spec(round_trip)?.run().await?;
 
     Ok(())
 }
